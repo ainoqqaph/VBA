@@ -112,13 +112,21 @@ def main() -> None:
     profile_sheets: dict[str, Any] = {}
 
     st.subheader("B. 分別設定 TINV 和 TPKG 來源對應")
-    tabs = st.tabs([DEFAULT_SECTIONS[key]["label"] for key in DEFAULT_SECTIONS])
+    st.info("這裡有兩個分頁要設定：先完成 1. TINV / Invoice，再點右邊的 2. TPKG / Packing List。")
+    tab_labels = ["1. TINV / Invoice", "2. TPKG / Packing List"]
+    tabs = st.tabs(tab_labels)
 
-    for tab, key in zip(tabs, DEFAULT_SECTIONS):
+    for tab, key, tab_label in zip(tabs, DEFAULT_SECTIONS, tab_labels):
         with tab:
+            st.markdown(f"## {tab_label}")
+            if key == "TINV":
+                st.caption("這一頁設定 Invoice 來源，通常選 INVOICE 分頁，VBA 來源工作表預設是 Inv。")
+            else:
+                st.caption("這一頁設定 Packing List 來源，通常選 PACKING 分頁，VBA 來源工作表預設是 Pkg。")
+
             config = template_configs.get(key)
             if not config or not config.columns:
-                st.warning(f"尚未設定 {key} 的最終格式欄位。")
+                st.warning(f"尚未設定 {key} 的最終格式欄位。請回到 A 區選擇 {key} 最終格式。")
                 continue
 
             rule, sheet_profile = _section_workflow(

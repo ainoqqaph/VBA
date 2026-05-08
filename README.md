@@ -1,6 +1,6 @@
-# Invoice / Packing List VBA Generator
+# VBA
 
-這是一個 Streamlit 小工具，用來協助報關 invoice / packing list 清洗流程。
+Invoice / Packing List VBA Generator 是一個 Streamlit 小工具，用來協助報關 invoice / packing list 清洗流程。
 
 目前版本可以：
 

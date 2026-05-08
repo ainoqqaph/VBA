@@ -52,6 +52,11 @@ streamlit run app.py
 
 - `INVcollection`
 - `PKGcollection`
+- `Main`
+- `TINV`
+- `CollectDataTinv`
+- `TPKG`
+- `CollectDataTpkg`
 
 Invoice 每筆資料會固定打包成：
 
@@ -66,6 +71,8 @@ tempArray = Array(i, Itemno, Po, QtyArray, NW, GW, DscArray, MS)
 ```
 
 OP 既有的後段寫入程式可以沿用這兩個 Collection。
+
+範例 VBA 可參考 `vba_snippets/op_temp_array_framework_generated.bas`。實際客戶仍建議由 Streamlit 對欄位後下載，才會帶入正確欄位位置。
 
 ## 後續要補的正式規則
 

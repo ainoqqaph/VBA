@@ -57,6 +57,7 @@ streamlit run app.py
 - `CollectDataTinv`
 - `TPKG`
 - `CollectDataTpkg`
+- `ExportOPTempArrayPreview`
 
 Invoice 每筆資料會固定打包成：
 
@@ -71,6 +72,13 @@ tempArray = Array(i, Itemno, Po, QtyArray, NW, GW, DscArray, MS)
 ```
 
 OP 既有的後段寫入程式可以沿用這兩個 Collection。
+
+如果 OP 想先檢查抓到的資料，可以執行 `ExportOPTempArrayPreview`，系統會輸出：
+
+- `Debug_INVcollection`
+- `Debug_PKGcollection`
+
+這兩張表會把巢狀陣列攤平成可讀文字，方便非 VBA 人員檢查。
 
 範例 VBA 可參考 `vba_snippets/op_temp_array_framework_generated.bas`。實際客戶仍建議由 Streamlit 對欄位後下載，才會帶入正確欄位位置。
 

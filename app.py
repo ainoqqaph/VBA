@@ -105,6 +105,9 @@ def main() -> None:
         st.error("沒有讀到可用資料。")
         return
 
+    with st.expander("已讀取到的來源分頁 / 表格"):
+        st.write([table.label for table in parsed_tables])
+
     rules: list[SheetTransformRule] = []
     profile_sheets: dict[str, Any] = {}
 
@@ -203,6 +206,9 @@ def _target_template_section(imported_profile: dict[str, Any]) -> dict[str, Outp
 
     configs: dict[str, OutputTemplateConfig] = {}
     if candidates:
+        with st.expander("已偵測到的最終範本候選"):
+            st.write([candidate.label for candidate in candidates])
+
         selector_cols = st.columns(2)
         for column, key in zip(selector_cols, DEFAULT_SECTIONS):
             with column:

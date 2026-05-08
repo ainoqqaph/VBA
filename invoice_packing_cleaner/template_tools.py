@@ -13,6 +13,8 @@ HEADER_KEYWORDS = {
     "no",
     "inv",
     "invoice",
+    "marks",
+    "nos",
     "po",
     "part",
     "item",
@@ -29,6 +31,8 @@ HEADER_KEYWORDS = {
     "weight",
     "ctn",
     "carton",
+    "carton no",
+    "ctn no",
     "package",
     "measurement",
     "cbm",
@@ -112,7 +116,12 @@ def _parse_excel_template(file_name: str, data: bytes) -> list[TemplateCandidate
             dtype=str,
             keep_default_na=False,
         )
-        candidates.extend(_detect_candidates(file_name, sheet_name, df))
+        sheet_candidates = _detect_candidates(file_name, sheet_name, df)
+        if not sheet_candidates:
+            fallback = _fallback_candidate(file_name, sheet_name, df)
+            if fallback:
+                sheet_candidates.append(fallback)
+        candidates.extend(sheet_candidates)
 
     return candidates
 
@@ -176,6 +185,51 @@ def _detect_candidates(file_name: str, sheet_name: str, df: pd.DataFrame) -> lis
 
     candidates.sort(key=lambda candidate: candidate.score, reverse=True)
     return candidates[:10]
+
+
+def _fallback_candidate(file_name: str, sheet_name: str, df: pd.DataFrame) -> TemplateCandidate | None:
+    if df.empty:
+        return None
+
+    best_row_idx = -1
+    best_score = -999
+    best_nonblank: list[tuple[int, str]] = []
+    max_scan_rows = min(len(df), 80)
+
+    for row_idx in range(max_scan_rows):
+        values = [clean_header(value) for value in df.iloc[row_idx].tolist()]
+        nonblank = [(idx + 1, value) for idx, value in enumerate(values) if value]
+        if len(nonblank) < 2:
+            continue
+
+        score = _score_header_row(nonblank)
+        if score > best_score:
+            best_row_idx = row_idx
+            best_score = score
+            best_nonblank = nonblank
+
+    if best_row_idx < 0 or not best_nonblank:
+        return None
+
+    unique_headers = make_unique_headers([value for _, value in best_nonblank])
+    columns = [
+        TemplateColumn(name=header, column_index=col_idx)
+        for (col_idx, _), header in zip(best_nonblank, unique_headers)
+    ]
+
+    return TemplateCandidate(
+        label=(
+            f"{file_name} / {sheet_name} / 第 {best_row_idx + 1} 列 "
+            f"({len(columns)} 欄，備用偵測，分數 {best_score})"
+        ),
+        file_name=file_name,
+        sheet_name=sheet_name,
+        header_row=best_row_idx + 1,
+        data_start_row=best_row_idx + 2,
+        columns=columns,
+        score=best_score,
+        dataframe=df,
+    )
 
 
 def _score_header_row(nonblank: list[tuple[int, str]]) -> int:

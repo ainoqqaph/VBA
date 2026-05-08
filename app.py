@@ -30,6 +30,7 @@ from invoice_packing_cleaner.template_tools import (
 from invoice_packing_cleaner.vba_generator import (
     FieldMapping,
     SheetTransformRule,
+    generate_op_temp_array_vba,
     generate_workbook_vba,
 )
 
@@ -84,6 +85,12 @@ def main() -> None:
             help="欄位會左右移動時建議用欄位名稱；表頭常重複或不穩定時可改用欄位位置。",
         )
         lookup_mode = "header" if lookup_mode_label.startswith("依欄位名稱") else "position"
+        vba_output_mode = st.radio(
+            "VBA 輸出模式",
+            ("OP tempArray / Collection 格式", "直接輸出 Tinv/Tpkg 工作表"),
+            index=0,
+            help="OP 模式會產生 INVcollection / PKGcollection，資料會照既有 tempArray 順序打包。",
+        )
 
     template_configs = _target_template_section(imported_profile)
 
@@ -144,10 +151,17 @@ def main() -> None:
         return
 
     st.subheader("C. 產生 VBA 與客戶規則")
-    vba_code = generate_workbook_vba(rules, lookup_mode=lookup_mode)
+    if vba_output_mode.startswith("OP tempArray"):
+        vba_code = generate_op_temp_array_vba(rules, lookup_mode=lookup_mode)
+        vba_file_suffix = "OP_TempArrays"
+    else:
+        vba_code = generate_workbook_vba(rules, lookup_mode=lookup_mode)
+        vba_file_suffix = "TINV_TPKG"
+
     profile = {
         "customer_name": customer_name.strip(),
         "lookup_mode": lookup_mode,
+        "vba_output_mode": vba_output_mode,
         "sheets": profile_sheets,
     }
     profile_json = dump_profile(profile)
@@ -158,7 +172,7 @@ def main() -> None:
         st.download_button(
             "下載 VBA 模組 .bas",
             data=vba_code.encode("utf-8-sig"),
-            file_name=f"{safe_customer_name}_TINV_TPKG.bas",
+            file_name=f"{safe_customer_name}_{vba_file_suffix}.bas",
             mime="text/plain",
         )
     with actions[1]:

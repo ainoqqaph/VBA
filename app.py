@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import traceback
+from dataclasses import dataclass
+from typing import Any
 
 import streamlit as st
 
@@ -10,13 +12,7 @@ from invoice_packing_cleaner.extractors import (
     UnsupportedFileType,
     parse_uploaded_file,
 )
-from invoice_packing_cleaner.profile_tools import (
-    build_profile,
-    dump_profile,
-    load_profile,
-    mappings_from_profile,
-    target_columns_from_profile,
-)
+from invoice_packing_cleaner.profile_tools import dump_profile, load_profile
 from invoice_packing_cleaner.table_tools import (
     DEFAULT_TARGET_COLUMNS,
     SourceColumn,
@@ -31,18 +27,48 @@ from invoice_packing_cleaner.template_tools import (
     build_template_preview,
     parse_output_template_file,
 )
-from invoice_packing_cleaner.vba_generator import FieldMapping, generate_vba
+from invoice_packing_cleaner.vba_generator import (
+    FieldMapping,
+    SheetTransformRule,
+    generate_workbook_vba,
+)
 
 
 st.set_page_config(page_title="Invoice / Packing List VBA Generator", layout="wide")
 
 
+DEFAULT_SECTIONS = {
+    "TINV": {
+        "label": "TINV / Invoice",
+        "source_sheet": "Inv",
+        "output_sheet": "Tinv",
+        "procedure": "CleanTINV",
+        "fixed_title": "HAND TOOL",
+    },
+    "TPKG": {
+        "label": "TPKG / Packing List",
+        "source_sheet": "Pkg",
+        "output_sheet": "Tpkg",
+        "procedure": "CleanTPKG",
+        "fixed_title": "",
+    },
+}
+
+
+@dataclass(frozen=True)
+class OutputTemplateConfig:
+    key: str
+    columns: list[TemplateColumn]
+    header_row: int
+    data_start_row: int
+    label: str
+
+
 def main() -> None:
     st.title("Invoice / Packing List VBA 產生器")
-    st.caption("用 OP 的最終輸出範本學欄位位置，再把客戶原始檔轉成固定格式 VBA。")
+    st.caption("同一份 OP 最終範本可分別偵測 TINV 和 TPKG，避免把 400 多個客戶格式寫死。")
 
     imported_profile = _load_profile_from_sidebar()
-    saved_mappings = mappings_from_profile(imported_profile)
 
     with st.sidebar:
         st.header("基本設定")
@@ -51,45 +77,23 @@ def main() -> None:
             value=str(imported_profile.get("customer_name", "")),
             placeholder="例如 TTI、客戶A、2026新版格式",
         )
-        document_mode = st.radio(
-            "客戶檔案型態",
-            ("Invoice + Packing List 放一起", "Invoice / Packing List 分開給"),
-            index=0,
-        )
-
-        source_profile = imported_profile.get("source", {})
-        output_profile = imported_profile.get("output", {})
-        lookup_default = 0 if source_profile.get("lookup_mode", "header") == "header" else 1
         lookup_mode_label = st.radio(
             "VBA 尋找來源欄位方式",
             ("依欄位名稱優先，找不到再用欄位位置", "只依欄位位置"),
-            index=lookup_default,
+            index=0 if imported_profile.get("lookup_mode", "header") == "header" else 1,
             help="欄位會左右移動時建議用欄位名稱；表頭常重複或不穩定時可改用欄位位置。",
         )
         lookup_mode = "header" if lookup_mode_label.startswith("依欄位名稱") else "position"
 
-        output_sheet_name = st.text_input(
-            "輸出工作表名稱",
-            value=str(output_profile.get("sheet_name", "CLEANED_INVOICE_PL")),
-        )
-        fixed_title = st.text_input(
-            "固定補入的大標題",
-            value=str(output_profile.get("fixed_title", "HAND TOOL")),
-            help="原始資料沒有分類標題時，VBA 會主動寫入。若不需要可留空。",
-        )
-
-    target_columns = _target_template_section(imported_profile)
+    template_configs = _target_template_section(imported_profile)
 
     uploaded_files = st.file_uploader(
         "上傳客戶原始 Invoice / Packing List 檔案",
         type=["xlsx", "xls", "xlsm", "csv", "pdf", "docx", "doc"],
         accept_multiple_files=True,
-        help="PDF 若是掃描圖片，這版先不做 OCR；舊版 .doc 請先轉成 .docx。",
+        help="可以一次上傳 invoice 和 packing list；也可以上傳 invoice+packing list 放在同一檔的檔案。",
         key="source_files",
     )
-
-    if document_mode == "Invoice / Packing List 分開給":
-        st.info("分開給的檔案這版先用同一套欄位對應產生 VBA；之後可用規則 JSON 擴充成 Invoice 與 Packing List 各自一套對應。")
 
     if not uploaded_files:
         st.info("先上傳客戶原始檔，工具會顯示可用的 sheet、PDF 頁面或 Word 表格。")
@@ -101,110 +105,40 @@ def main() -> None:
         st.error("沒有讀到可用資料。")
         return
 
-    selected_table = _select_table(parsed_tables)
-    raw_df = selected_table.dataframe
+    rules: list[SheetTransformRule] = []
+    profile_sheets: dict[str, Any] = {}
 
-    if selected_table.note:
-        st.warning(selected_table.note)
+    st.subheader("B. 分別設定 TINV 和 TPKG 來源對應")
+    tabs = st.tabs([DEFAULT_SECTIONS[key]["label"] for key in DEFAULT_SECTIONS])
 
-    if raw_df.empty:
-        st.error("這個區塊沒有資料可預覽。")
+    for tab, key in zip(tabs, DEFAULT_SECTIONS):
+        with tab:
+            config = template_configs.get(key)
+            if not config or not config.columns:
+                st.warning(f"尚未設定 {key} 的最終格式欄位。")
+                continue
+
+            rule, sheet_profile = _section_workflow(
+                key=key,
+                config=config,
+                parsed_tables=parsed_tables,
+                imported_profile=imported_profile,
+            )
+            if rule:
+                rules.append(rule)
+                profile_sheets[key] = sheet_profile
+
+    if not rules:
+        st.error("請至少完成一個 TINV 或 TPKG 的欄位對應。")
         return
 
-    st.subheader("1. 原始資料預覽")
-    st.dataframe(raw_df.head(80), use_container_width=True)
-
-    st.subheader("2. 指定來源表頭與資料列")
-    max_rows = max(len(raw_df), 1)
-    source_profile = imported_profile.get("source", {})
-    default_header_row = _bounded_int(source_profile.get("header_row", 1), 1, max_rows)
-    default_data_start_row = _bounded_int(source_profile.get("data_start_row", 2), 1, max_rows)
-
-    setup_cols = st.columns(3)
-    with setup_cols[0]:
-        header_row = st.number_input("來源表頭列", min_value=1, max_value=max_rows, value=default_header_row, step=1)
-    with setup_cols[1]:
-        data_start_row = st.number_input(
-            "來源資料開始列",
-            min_value=1,
-            max_value=max_rows,
-            value=default_data_start_row,
-            step=1,
-        )
-    with setup_cols[2]:
-        st.metric("目前來源", selected_table.kind)
-
-    structured_df, source_headers = prepare_structured_table(raw_df, int(header_row), int(data_start_row))
-    source_options = build_source_options(source_headers)
-
-    st.caption("下方預覽會用你指定的來源表頭列作為欄位名稱。")
-    st.dataframe(structured_df.head(40), use_container_width=True)
-
-    if not target_columns:
-        st.error("請先設定或上傳最終輸出欄位。")
-        return
-
-    st.subheader("3. 對應來源欄位到最終格式")
-    st.caption("左邊是 OP 最終格式偵測到的位置；右邊選客戶原始檔的來源欄位。未對應的欄位會輸出空白。")
-    mappings = _mapping_editor(target_columns, source_options, saved_mappings)
-
-    output_profile = imported_profile.get("output", {})
-    default_output_header_row = _bounded_int(
-        output_profile.get("header_row", st.session_state.get("detected_output_header_row", 1)),
-        1,
-        500,
-    )
-    default_output_data_start_row = _bounded_int(
-        output_profile.get("data_start_row", st.session_state.get("detected_output_data_start_row", 2)),
-        1,
-        500,
-    )
-
-    st.subheader("4. 輸出位置設定")
-    output_cols = st.columns(2)
-    with output_cols[0]:
-        output_header_row = st.number_input(
-            "最終格式表頭列",
-            min_value=1,
-            max_value=500,
-            value=default_output_header_row,
-            step=1,
-            help="通常等於 OP 範本裡欄位名稱所在的列。",
-        )
-    with output_cols[1]:
-        output_data_start_row = st.number_input(
-            "最終格式資料開始列",
-            min_value=1,
-            max_value=500,
-            value=default_output_data_start_row,
-            step=1,
-            help="VBA 會從這一列開始寫入轉換後資料。",
-        )
-
-    st.subheader("5. 產生 VBA 與客戶規則")
-    vba_code = generate_vba(
-        mappings=mappings,
-        header_row=int(header_row),
-        data_start_row=int(data_start_row),
-        output_sheet_name=output_sheet_name.strip() or "CLEANED_INVOICE_PL",
-        output_header_row=int(output_header_row),
-        output_data_start_row=int(output_data_start_row),
-        lookup_mode=lookup_mode,
-        fixed_title=fixed_title.strip(),
-    )
-
-    profile = build_profile(
-        customer_name=customer_name.strip(),
-        document_mode=document_mode,
-        header_row=int(header_row),
-        data_start_row=int(data_start_row),
-        output_sheet_name=output_sheet_name.strip() or "CLEANED_INVOICE_PL",
-        output_header_row=int(output_header_row),
-        output_data_start_row=int(output_data_start_row),
-        lookup_mode=lookup_mode,
-        fixed_title=fixed_title.strip(),
-        mappings=mappings,
-    )
+    st.subheader("C. 產生 VBA 與客戶規則")
+    vba_code = generate_workbook_vba(rules, lookup_mode=lookup_mode)
+    profile = {
+        "customer_name": customer_name.strip(),
+        "lookup_mode": lookup_mode,
+        "sheets": profile_sheets,
+    }
     profile_json = dump_profile(profile)
     safe_customer_name = _safe_file_stem(customer_name or "customer_rule")
 
@@ -213,7 +147,7 @@ def main() -> None:
         st.download_button(
             "下載 VBA 模組 .bas",
             data=vba_code.encode("utf-8-sig"),
-            file_name=f"{safe_customer_name}_CleanInvoicePackingList.bas",
+            file_name=f"{safe_customer_name}_TINV_TPKG.bas",
             mime="text/plain",
         )
     with actions[1]:
@@ -228,7 +162,7 @@ def main() -> None:
     st.code(vba_code, language="vbnet")
 
 
-def _load_profile_from_sidebar() -> dict:
+def _load_profile_from_sidebar() -> dict[str, Any]:
     with st.sidebar:
         st.header("客戶規則")
         profile_file = st.file_uploader(
@@ -250,65 +184,218 @@ def _load_profile_from_sidebar() -> dict:
         return {}
 
 
-def _target_template_section(imported_profile: dict) -> list[TemplateColumn]:
+def _target_template_section(imported_profile: dict[str, Any]) -> dict[str, OutputTemplateConfig]:
     st.subheader("A. OP 最終輸出格式範本")
-    st.caption("上傳 OP 以前手打好的最終格式檔，系統會偵測欄位名稱與輸出位置。這是用來學格式，不是客戶原始檔。")
+    st.caption("上傳一份 OP 手打好的最終格式檔；如果裡面有 TINV 和 TPKG 工作表，下面可以分別選。")
 
-    profile_columns = target_columns_from_profile(imported_profile)
     template_file = st.file_uploader(
         "上傳 OP 最終格式範本（Excel / CSV，可選）",
         type=["xlsx", "xls", "xlsm", "csv"],
         key="output_template",
     )
 
+    candidates: list[TemplateCandidate] = []
     if template_file:
         try:
             candidates = parse_output_template_file(template_file.name, template_file.getvalue())
         except Exception as exc:
             st.error(f"最終格式範本讀取失敗：{exc}")
-            candidates = []
 
-        if candidates:
-            selected_candidate = _select_template_candidate(candidates)
-            st.session_state["detected_output_header_row"] = selected_candidate.header_row
-            st.session_state["detected_output_data_start_row"] = selected_candidate.data_start_row
+    configs: dict[str, OutputTemplateConfig] = {}
+    if candidates:
+        selector_cols = st.columns(2)
+        for column, key in zip(selector_cols, DEFAULT_SECTIONS):
+            with column:
+                selected = _select_template_candidate_for_section(key, candidates)
+                if selected:
+                    configs[key] = OutputTemplateConfig(
+                        key=key,
+                        columns=selected.columns,
+                        header_row=selected.header_row,
+                        data_start_row=selected.data_start_row,
+                        label=selected.label,
+                    )
+                    st.dataframe(
+                        build_template_preview(selected.columns, selected.header_row),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
-            preview_cols = st.columns([1, 2])
-            with preview_cols[0]:
-                st.markdown("偵測到的輸出欄位位置")
-                st.dataframe(
-                    build_template_preview(selected_candidate.columns, selected_candidate.header_row),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            with preview_cols[1]:
-                st.markdown("範本預覽")
-                st.dataframe(selected_candidate.dataframe.head(40), use_container_width=True)
+        with st.expander("範本預覽"):
+            preview_label = st.selectbox("選擇預覽的偵測結果", [candidate.label for candidate in candidates])
+            preview = candidates[[candidate.label for candidate in candidates].index(preview_label)]
+            st.dataframe(preview.dataframe.head(50), use_container_width=True)
 
-            return selected_candidate.columns
+        return configs
 
-        st.warning("沒有自動偵測到像表頭的列。你可以改用下方手動欄位清單。")
+    st.warning("如果最終範本內有 TINV 和 TPKG，建議上傳那份 Excel。沒有範本時可先用手動欄位。")
+    manual_cols = st.columns(2)
+    for column, key in zip(manual_cols, DEFAULT_SECTIONS):
+        with column:
+            sheet_profile = _sheet_profile(imported_profile, key)
+            default_columns = _columns_from_sheet_profile(sheet_profile) or [
+                TemplateColumn(name, index)
+                for index, name in enumerate(DEFAULT_TARGET_COLUMNS, start=1)
+            ]
+            names_text = st.text_area(
+                f"{key} 最終輸出欄位（一行一個）",
+                value="\n".join(column.name for column in default_columns),
+                height=220,
+                key=f"{key}_manual_targets",
+            )
+            names = split_target_columns(names_text)
+            configs[key] = OutputTemplateConfig(
+                key=key,
+                columns=[TemplateColumn(name, index) for index, name in enumerate(names, start=1)],
+                header_row=int(sheet_profile.get("output_header_row", 1) or 1),
+                data_start_row=int(sheet_profile.get("output_data_start_row", 2) or 2),
+                label=f"{key} 手動欄位",
+            )
 
-    with st.expander("沒有範本時：手動輸入最終欄位", expanded=not profile_columns):
-        default_columns = profile_columns or [
-            TemplateColumn(name, index)
-            for index, name in enumerate(DEFAULT_TARGET_COLUMNS, start=1)
-        ]
-        target_columns_text = st.text_area(
-            "最終輸出欄位（一行一個，也可用逗號分隔）",
-            value="\n".join(column.name for column in default_columns),
-            height=220,
+    return configs
+
+
+def _select_template_candidate_for_section(
+    key: str,
+    candidates: list[TemplateCandidate],
+) -> TemplateCandidate | None:
+    labels = ["（不產生）"] + [candidate.label for candidate in candidates]
+    default_index = _default_candidate_index(key, candidates)
+    selected_label = st.selectbox(
+        f"{key} 最終格式",
+        labels,
+        index=default_index,
+        key=f"{key}_template_candidate",
+        help=f"選擇 OP 範本中對應 {key} 的工作表或表頭列。",
+    )
+    if selected_label == "（不產生）":
+        return None
+    return candidates[[candidate.label for candidate in candidates].index(selected_label)]
+
+
+def _section_workflow(
+    key: str,
+    config: OutputTemplateConfig,
+    parsed_tables: list[ParsedTable],
+    imported_profile: dict[str, Any],
+) -> tuple[SheetTransformRule | None, dict[str, Any]]:
+    defaults = DEFAULT_SECTIONS[key]
+    sheet_profile = _sheet_profile(imported_profile, key)
+    saved_mappings = _mappings_by_target(sheet_profile.get("mappings", []))
+
+    st.markdown(f"### {defaults['label']}")
+    st.caption(f"最終格式來源：{config.label}")
+
+    source_sheet_name = st.text_input(
+        "VBA 讀取的來源工作表名稱",
+        value=str(sheet_profile.get("source_sheet", defaults["source_sheet"])),
+        key=f"{key}_source_sheet_name",
+        help="未來在 Excel 裡，原始 invoice 建議放 Inv，packing list 建議放 Pkg。",
+    )
+    output_sheet_name = st.text_input(
+        "VBA 輸出的工作表名稱",
+        value=str(sheet_profile.get("output_sheet", defaults["output_sheet"])),
+        key=f"{key}_output_sheet_name",
+    )
+    fixed_title = st.text_input(
+        "固定補入的大標題",
+        value=str(sheet_profile.get("fixed_title", defaults["fixed_title"])),
+        key=f"{key}_fixed_title",
+        help="例如 TINV 需要 HAND TOOL，TPKG 通常可留空。",
+    )
+
+    selected_table = _select_source_table_for_section(key, parsed_tables)
+    raw_df = selected_table.dataframe
+    if selected_table.note:
+        st.warning(selected_table.note)
+    if raw_df.empty:
+        st.error("這個來源沒有資料可預覽。")
+        return None, {}
+
+    st.dataframe(raw_df.head(45), use_container_width=True)
+
+    max_rows = max(len(raw_df), 1)
+    setup_cols = st.columns(4)
+    with setup_cols[0]:
+        header_row = st.number_input(
+            "來源表頭列",
+            min_value=1,
+            max_value=max_rows,
+            value=_bounded_int(sheet_profile.get("header_row", 1), 1, max_rows),
+            step=1,
+            key=f"{key}_header_row",
         )
-        names = split_target_columns(target_columns_text)
-        return [TemplateColumn(name, index) for index, name in enumerate(names, start=1)]
+    with setup_cols[1]:
+        data_start_row = st.number_input(
+            "來源資料開始列",
+            min_value=1,
+            max_value=max_rows,
+            value=_bounded_int(sheet_profile.get("data_start_row", 2), 1, max_rows),
+            step=1,
+            key=f"{key}_data_start_row",
+        )
+    with setup_cols[2]:
+        output_header_row = st.number_input(
+            "最終格式表頭列",
+            min_value=1,
+            max_value=500,
+            value=_bounded_int(sheet_profile.get("output_header_row", config.header_row), 1, 500),
+            step=1,
+            key=f"{key}_output_header_row",
+        )
+    with setup_cols[3]:
+        output_data_start_row = st.number_input(
+            "最終格式資料開始列",
+            min_value=1,
+            max_value=500,
+            value=_bounded_int(sheet_profile.get("output_data_start_row", config.data_start_row), 1, 500),
+            step=1,
+            key=f"{key}_output_data_start_row",
+        )
 
-    return profile_columns
+    structured_df, source_headers = prepare_structured_table(raw_df, int(header_row), int(data_start_row))
+    source_options = build_source_options(source_headers)
+    with st.expander("用來源表頭列整理後的預覽"):
+        st.dataframe(structured_df.head(30), use_container_width=True)
 
+    st.markdown("欄位對應")
+    mappings = _mapping_editor(
+        section_key=key,
+        target_columns=config.columns,
+        source_options=source_options,
+        saved_mappings=saved_mappings,
+    )
 
-def _select_template_candidate(candidates: list[TemplateCandidate]) -> TemplateCandidate:
-    labels = [candidate.label for candidate in candidates]
-    selected_label = st.selectbox("選擇偵測到的最終格式表頭列", labels)
-    return candidates[labels.index(selected_label)]
+    rule = SheetTransformRule(
+        procedure_name=str(defaults["procedure"]),
+        source_sheet_name=source_sheet_name.strip() or str(defaults["source_sheet"]),
+        output_sheet_name=output_sheet_name.strip() or str(defaults["output_sheet"]),
+        mappings=mappings,
+        header_row=int(header_row),
+        data_start_row=int(data_start_row),
+        output_header_row=int(output_header_row),
+        output_data_start_row=int(output_data_start_row),
+        fixed_title=fixed_title.strip(),
+    )
+    profile = {
+        "source_sheet": rule.source_sheet_name,
+        "output_sheet": rule.output_sheet_name,
+        "header_row": rule.header_row,
+        "data_start_row": rule.data_start_row,
+        "output_header_row": rule.output_header_row,
+        "output_data_start_row": rule.output_data_start_row,
+        "fixed_title": rule.fixed_title,
+        "mappings": [
+            {
+                "target": mapping.target,
+                "target_col": mapping.target_col,
+                "source_header": mapping.source_header,
+                "source_index": mapping.source_index,
+            }
+            for mapping in mappings
+        ],
+    }
+    return rule, profile
 
 
 def _parse_uploaded_files(uploaded_files) -> list[ParsedTable]:
@@ -329,16 +416,23 @@ def _parse_uploaded_files(uploaded_files) -> list[ParsedTable]:
     return parsed_tables
 
 
-def _select_table(parsed_tables: list[ParsedTable]) -> ParsedTable:
+def _select_source_table_for_section(key: str, parsed_tables: list[ParsedTable]) -> ParsedTable:
     labels = [table.label for table in parsed_tables]
-    selected_label = st.selectbox("選擇要建立規則的來源表格 / 頁面", labels)
+    default_index = _default_source_table_index(key, labels)
+    selected_label = st.selectbox(
+        f"選擇 {key} 的客戶原始來源",
+        labels,
+        index=default_index,
+        key=f"{key}_source_table",
+    )
     return parsed_tables[labels.index(selected_label)]
 
 
 def _mapping_editor(
+    section_key: str,
     target_columns: list[TemplateColumn],
     source_options: list[SourceColumn],
-    saved_mappings: dict[str, dict],
+    saved_mappings: dict[str, dict[str, Any]],
 ) -> list[FieldMapping]:
     option_labels = [option.label for option in source_options]
     mappings: list[FieldMapping] = []
@@ -360,7 +454,7 @@ def _mapping_editor(
                     target.name,
                     option_labels,
                     index=default_index,
-                    key=f"map_{target_index}_{target.name}_{target.column_index}",
+                    key=f"{section_key}_map_{target_index}_{target.name}_{target.column_index}",
                 )
                 source = source_options[option_labels.index(selected_label)]
                 mappings.append(
@@ -375,10 +469,29 @@ def _mapping_editor(
     return mappings
 
 
+def _default_candidate_index(key: str, candidates: list[TemplateCandidate]) -> int:
+    key_lower = key.lower()
+    for index, candidate in enumerate(candidates, start=1):
+        sheet = candidate.sheet_name.lower()
+        label = candidate.label.lower()
+        if key_lower in sheet or key_lower in label:
+            return index
+    return 1 if candidates else 0
+
+
+def _default_source_table_index(key: str, labels: list[str]) -> int:
+    needles = ["inv", "invoice"] if key == "TINV" else ["pkg", "packing", "pack"]
+    for index, label in enumerate(labels):
+        lower = label.lower()
+        if any(needle in lower for needle in needles):
+            return index
+    return 0
+
+
 def _default_source_option_index(
     target: str,
     source_options: list[SourceColumn],
-    saved_mapping: dict,
+    saved_mapping: dict[str, Any],
 ) -> int:
     saved_index = int(saved_mapping.get("source_index") or 0)
     if saved_index > 0:
@@ -395,15 +508,49 @@ def _default_source_option_index(
     return find_default_source_index(target, source_options)
 
 
+def _sheet_profile(imported_profile: dict[str, Any], key: str) -> dict[str, Any]:
+    sheets = imported_profile.get("sheets", {})
+    if isinstance(sheets, dict) and isinstance(sheets.get(key), dict):
+        return sheets[key]
+    return {}
+
+
+def _columns_from_sheet_profile(sheet_profile: dict[str, Any]) -> list[TemplateColumn]:
+    mappings = sheet_profile.get("mappings", [])
+    if not isinstance(mappings, list):
+        return []
+
+    columns: list[TemplateColumn] = []
+    for index, mapping in enumerate(mappings, start=1):
+        if not isinstance(mapping, dict):
+            continue
+        target = str(mapping.get("target", "")).strip()
+        if not target:
+            continue
+        target_col = int(mapping.get("target_col") or index)
+        columns.append(TemplateColumn(target, target_col))
+    return columns
+
+
+def _mappings_by_target(mappings: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(mappings, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for mapping in mappings:
+        if isinstance(mapping, dict) and mapping.get("target"):
+            result[str(mapping["target"])] = mapping
+    return result
+
+
 def _show_next_steps() -> None:
     with st.expander("建議工作流程"):
         st.markdown(
-            "1. 上傳 OP 以前手打好的最終輸出格式，讓系統偵測輸出欄位位置。\n"
-            "2. 上傳客戶原始 invoice / packing list。\n"
-            "3. 選擇正確的 sheet、PDF 頁面或 Word 表格。\n"
-            "4. 指定來源表頭列與來源資料開始列。\n"
-            "5. 把來源欄位對應到 OP 最終格式欄位。\n"
-            "6. 下載 VBA 和客戶規則 JSON。"
+            "1. 上傳 OP 以前手打好的最終輸出格式，裡面可同時有 TINV 和 TPKG。\n"
+            "2. 分別選 TINV 最終格式與 TPKG 最終格式。\n"
+            "3. 上傳客戶原始 invoice / packing list。\n"
+            "4. 在 TINV 分頁選 invoice 來源，在 TPKG 分頁選 packing list 來源。\n"
+            "5. 分別設定來源表頭列、來源資料開始列與欄位對應。\n"
+            "6. 下載同一份 VBA 和客戶規則 JSON。"
         )
 
 

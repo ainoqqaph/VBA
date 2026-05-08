@@ -8,6 +8,7 @@ class FieldMapping:
     target: str
     source_header: str = ""
     source_index: int = 0
+    target_col: int = 0
 
 
 def generate_vba(
@@ -15,6 +16,8 @@ def generate_vba(
     header_row: int,
     data_start_row: int,
     output_sheet_name: str = "CLEANED_INVOICE_PL",
+    output_header_row: int = 1,
+    output_data_start_row: int = 2,
     lookup_mode: str = "header",
     fixed_title: str = "",
 ) -> str:
@@ -22,6 +25,7 @@ def generate_vba(
     target_headers = [mapping.target for mapping in mappings]
     source_headers = [mapping.source_header for mapping in mappings]
     fallback_cols = [mapping.source_index for mapping in mappings]
+    target_cols = [mapping.target_col or index for index, mapping in enumerate(mappings, start=1)]
 
     return f'''Option Explicit
 
@@ -32,6 +36,8 @@ Public Sub CleanInvoicePackingList()
     Const OUTPUT_SHEET_NAME As String = {_vba_string(output_sheet_name)}
     Const HEADER_ROW As Long = {max(header_row, 1)}
     Const DATA_START_ROW As Long = {max(data_start_row, 1)}
+    Const OUTPUT_HEADER_ROW As Long = {max(output_header_row, 1)}
+    Const OUTPUT_DATA_START_ROW As Long = {max(output_data_start_row, 1)}
     Const USE_HEADER_LOOKUP As Boolean = {_vba_boolean(use_header_lookup)}
     Const FIXED_TITLE As String = {_vba_string(fixed_title)}
 
@@ -40,7 +46,9 @@ Public Sub CleanInvoicePackingList()
     Dim targetHeaders As Variant
     Dim sourceHeaders As Variant
     Dim fallbackCols As Variant
+    Dim targetCols As Variant
     Dim sourceCols() As Long
+    Dim outputCols() As Long
     Dim lastRow As Long
     Dim outRow As Long
     Dim r As Long
@@ -53,10 +61,15 @@ Public Sub CleanInvoicePackingList()
     targetHeaders = {_vba_array_strings(target_headers)}
     sourceHeaders = {_vba_array_strings(source_headers)}
     fallbackCols = {_vba_array_numbers(fallback_cols)}
+    targetCols = {_vba_array_numbers(target_cols)}
     ReDim sourceCols(LBound(targetHeaders) To UBound(targetHeaders))
+    ReDim outputCols(LBound(targetHeaders) To UBound(targetHeaders))
 
     For i = LBound(targetHeaders) To UBound(targetHeaders)
-        wsOut.Cells(1, i + 1).Value = CStr(targetHeaders(i))
+        outputCols(i) = CLng(targetCols(i))
+        If outputCols(i) <= 0 Then outputCols(i) = i + 1
+
+        wsOut.Cells(OUTPUT_HEADER_ROW, outputCols(i)).Value = CStr(targetHeaders(i))
         sourceCols(i) = 0
 
         If USE_HEADER_LOOKUP And Len(CStr(sourceHeaders(i))) > 0 Then
@@ -69,7 +82,7 @@ Public Sub CleanInvoicePackingList()
     Next i
 
     lastRow = LastUsedRow(wsSrc)
-    outRow = 2
+    outRow = OUTPUT_DATA_START_ROW
 
     If Len(CleanCellText(FIXED_TITLE)) > 0 Then
         wsOut.Cells(outRow, 1).Value = CleanCellText(FIXED_TITLE)
@@ -81,19 +94,19 @@ Public Sub CleanInvoicePackingList()
         If RowHasMappedData(wsSrc, r, sourceCols) Then
             For i = LBound(targetHeaders) To UBound(targetHeaders)
                 If sourceCols(i) > 0 Then
-                    wsOut.Cells(outRow, i + 1).Value = CleanCellText(wsSrc.Cells(r, sourceCols(i)).Text)
+                    wsOut.Cells(outRow, outputCols(i)).Value = CleanCellText(wsSrc.Cells(r, sourceCols(i)).Text)
                 Else
-                    wsOut.Cells(outRow, i + 1).Value = vbNullString
+                    wsOut.Cells(outRow, outputCols(i)).Value = vbNullString
                 End If
             Next i
             outRow = outRow + 1
         End If
     Next r
 
-    wsOut.Rows(1).Font.Bold = True
+    wsOut.Rows(OUTPUT_HEADER_ROW).Font.Bold = True
     wsOut.Columns.AutoFit
 
-    MsgBox "完成：已輸出 " & (outRow - 2) & " 筆資料到 " & OUTPUT_SHEET_NAME, vbInformation
+    MsgBox "完成：已輸出 " & (outRow - OUTPUT_DATA_START_ROW) & " 筆資料到 " & OUTPUT_SHEET_NAME, vbInformation
 End Sub
 
 Private Function GetOrCreateSheet(ByVal sheetName As String) As Worksheet

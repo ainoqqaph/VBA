@@ -13,6 +13,7 @@ env/
 .ruff_cache/
 
 *.log
+.env
 *.tmp
 ~$*
 

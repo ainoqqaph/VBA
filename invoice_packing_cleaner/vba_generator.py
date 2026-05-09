@@ -22,6 +22,8 @@ class SheetTransformRule:
     output_header_row: int
     output_data_start_row: int
     fixed_title: str = ""
+    nw_mode: str = "source_is_unit"
+    gw_mode: str = "source_is_unit"
 
 
 def generate_vba(
@@ -576,6 +578,37 @@ Private Function CleanNumberText(ByVal value As String) As String
     CleanNumberText = result
 End Function
 
+Private Function AdjustWeightForTempArray(ByVal weightText As String, ByVal ctnText As String, ByVal calcMode As String) As String
+    Dim weightValue As Double
+    Dim ctnValue As Double
+    Dim resultValue As Double
+
+    weightText = CleanNumberText(weightText)
+    ctnText = CleanNumberText(ctnText)
+
+    If Len(weightText) = 0 Then
+        AdjustWeightForTempArray = vbNullString
+        Exit Function
+    End If
+
+    weightValue = Val(weightText)
+    ctnValue = Val(ctnText)
+    If ctnValue <= 0 Then ctnValue = 1
+
+    Select Case LCase$(CleanCellText(calcMode))
+        Case "source_is_total"
+            resultValue = weightValue / ctnValue
+        Case Else
+            resultValue = weightValue
+    End Select
+
+    AdjustWeightForTempArray = NumberToText(resultValue)
+End Function
+
+Private Function NumberToText(ByVal value As Double) As String
+    NumberToText = Trim$(Str$(Round(value, 4)))
+End Function
+
 Private Function DefaultText(ByVal value As String, ByVal fallback As String) As String
     value = CleanCellText(value)
     If Len(value) = 0 Then
@@ -903,6 +936,8 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Const DATA_START_ROW As Long = {max(rule.data_start_row, 1)}
     Const USE_HEADER_LOOKUP As Boolean = {_vba_boolean(lookup_mode == "header")}
     Const FIXED_TITLE As String = {_vba_string(rule.fixed_title)}
+    Const NW_CALC_MODE As String = {_vba_string(rule.nw_mode)}
+    Const GW_CALC_MODE As String = {_vba_string(rule.gw_mode)}
 
     Dim targetHeaders As Variant
     Dim sourceHeaders As Variant
@@ -949,8 +984,8 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit qty", "uqty", "quantity", "qty", "數量")))
             Qty = DefaultText(CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("qty", "quantity", "數量"))), UQty)
             unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit", "uom", "單位")), "PCS")
-            NW = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("net weight", "n.w", "nw", "淨重")))
-            GW = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("gross weight", "g.w", "gw", "毛重")))
+            NW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("net weight", "n.w", "nw", "淨重")), CTN, NW_CALC_MODE)
+            GW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("gross weight", "g.w", "gw", "毛重")), CTN, GW_CALC_MODE)
             MS = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("measurement", "measure", "cbm", "volume", "材積")))
             Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("title", "category", "分類")))
 

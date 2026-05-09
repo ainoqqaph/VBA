@@ -110,9 +110,9 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     ' targetHeaders：系統要抓的標準資料名稱
     ' sourceHeaders：客戶原始檔上看到的表頭名稱
     ' fallbackCols ：找不到表頭時，改用欄位位置
-    targetHeaders = Array("Item No", "Description of Goods", "Quantity", "Unit Price", "Amount", "HS Code", "Brand")
-    sourceHeaders = Array("TTI Part No", "Goods Desc", "Quantity", "Unit Price", "Amount", "HS Code", "Brand")
-    fallbackCols = Array(4, 6, 8, 9, 10, 11, 12)
+    targetHeaders = Array("Marks & Nos.", "Description of Goods", "Quantity", "Unit", "Unit Price", "Amount", "HS", "Brand")
+    sourceHeaders = Array("PO No.", "Goods Description", "Quantity", "Unit", "Unit Price", "Amount", "HS", "Brand")
+    fallbackCols = Array(2, 6, 8, 9, 10, 11, 12, 13)
     ReDim sourceCols(LBound(targetHeaders) To UBound(targetHeaders))
     ResolveSourceColumns Dst, HEADER_ROW, USE_HEADER_LOOKUP, sourceHeaders, fallbackCols, sourceCols
 
@@ -170,6 +170,8 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Const DATA_START_ROW As Long = 17
     Const USE_HEADER_LOOKUP As Boolean = True
     Const FIXED_TITLE As String = ""
+    Const NW_CALC_MODE As String = "source_is_unit"
+    Const GW_CALC_MODE As String = "source_is_unit"
 
     Dim targetHeaders As Variant
     Dim sourceHeaders As Variant
@@ -199,9 +201,9 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     ' targetHeaders：系統要抓的標準資料名稱
     ' sourceHeaders：客戶原始檔上看到的表頭名稱
     ' fallbackCols ：找不到表頭時，改用欄位位置
-    targetHeaders = Array("Marks & Nos.", "Description of Goods", "Quantity", "Net Weight", "Gross Weight", "Measurement")
-    sourceHeaders = Array("Marks & Nos.", "Description of Goods", "Quantity", "N.W.", "G.W.", "Measurement")
-    fallbackCols = Array(1, 5, 8, 10, 11, 12)
+    targetHeaders = Array("Marks & Nos.", "Carton", "Description of Goods", "Quantity", "Unit", "NW", "GW", "Measurement")
+    sourceHeaders = Array("Carton No.", "CTN", "Description", "Quantity", "Unit", "N.W.", "G.W.", "CBM")
+    fallbackCols = Array(1, 2, 5, 8, 9, 10, 11, 12)
     ReDim sourceCols(LBound(targetHeaders) To UBound(targetHeaders))
     ResolveSourceColumns Dst, HEADER_ROW, USE_HEADER_LOOKUP, sourceHeaders, fallbackCols, sourceCols
 
@@ -216,8 +218,8 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit qty", "uqty", "quantity", "qty", "數量")))
             Qty = DefaultText(CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("qty", "quantity", "數量"))), UQty)
             unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit", "uom", "單位")), "PCS")
-            NW = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("net weight", "n.w", "nw", "淨重")))
-            GW = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("gross weight", "g.w", "gw", "毛重")))
+            NW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("net weight", "n.w", "nw", "淨重")), CTN, NW_CALC_MODE)
+            GW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("gross weight", "g.w", "gw", "毛重")), CTN, GW_CALC_MODE)
             MS = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("measurement", "measure", "cbm", "volume", "材積")))
             Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("title", "category", "分類")))
 
@@ -371,6 +373,37 @@ Private Function CleanNumberText(ByVal value As String) As String
     Next i
 
     CleanNumberText = result
+End Function
+
+Private Function AdjustWeightForTempArray(ByVal weightText As String, ByVal ctnText As String, ByVal calcMode As String) As String
+    Dim weightValue As Double
+    Dim ctnValue As Double
+    Dim resultValue As Double
+
+    weightText = CleanNumberText(weightText)
+    ctnText = CleanNumberText(ctnText)
+
+    If Len(weightText) = 0 Then
+        AdjustWeightForTempArray = vbNullString
+        Exit Function
+    End If
+
+    weightValue = Val(weightText)
+    ctnValue = Val(ctnText)
+    If ctnValue <= 0 Then ctnValue = 1
+
+    Select Case LCase$(CleanCellText(calcMode))
+        Case "source_is_total"
+            resultValue = weightValue / ctnValue
+        Case Else
+            resultValue = weightValue
+    End Select
+
+    AdjustWeightForTempArray = NumberToText(resultValue)
+End Function
+
+Private Function NumberToText(ByVal value As Double) As String
+    NumberToText = Trim$(Str$(Round(value, 4)))
 End Function
 
 Private Function DefaultText(ByVal value As String, ByVal fallback As String) As String

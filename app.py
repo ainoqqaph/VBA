@@ -55,6 +55,11 @@ DEFAULT_SECTIONS = {
     },
 }
 
+WEIGHT_MODE_LABELS = {
+    "source_is_unit": "來源是單箱/單件重量：直接放進 tempArray",
+    "source_is_total": "來源是總重量：先除以箱數再放進 tempArray",
+}
+
 
 @dataclass(frozen=True)
 class OutputTemplateConfig:
@@ -78,6 +83,28 @@ def main() -> None:
             value=str(imported_profile.get("customer_name", "")),
             placeholder="例如 TTI、客戶A、2026新版格式",
         )
+        imported_classification = _classification_profile(imported_profile)
+        with st.expander("客戶規則分類", expanded=True):
+            end_customer_name = st.text_input(
+                "終端客戶 / 買方 / 品牌",
+                value=str(imported_classification.get("end_customer_name", "")),
+                placeholder="例如：客戶的客戶、品牌、Consignee",
+            )
+            rule_category = st.text_input(
+                "規則分類",
+                value=str(imported_classification.get("rule_category", "")),
+                placeholder="例如：一般格式 / 總重推算 / 特殊品名",
+            )
+            rule_tags = st.text_input(
+                "搜尋標籤",
+                value=", ".join(imported_classification.get("tags", [])),
+                placeholder="例如：GW總重, NW單箱, HAND TOOL",
+            )
+            rule_note = st.text_area(
+                "規則備註",
+                value=str(imported_classification.get("note", "")),
+                height=90,
+            )
         lookup_mode_label = st.radio(
             "VBA 尋找來源欄位方式",
             ("依欄位名稱優先，找不到再用欄位位置", "只依欄位位置"),
@@ -160,12 +187,26 @@ def main() -> None:
 
     profile = {
         "customer_name": customer_name.strip(),
+        "classification": {
+            "company_customer_name": customer_name.strip(),
+            "end_customer_name": end_customer_name.strip(),
+            "rule_category": rule_category.strip(),
+            "tags": _split_tags(rule_tags),
+            "note": rule_note.strip(),
+        },
         "lookup_mode": lookup_mode,
         "vba_output_mode": vba_output_mode,
         "sheets": profile_sheets,
     }
     profile_json = dump_profile(profile)
-    safe_customer_name = _safe_file_stem(customer_name or "customer_rule")
+    safe_customer_name = _safe_file_stem(
+        "_".join(
+            part
+            for part in [customer_name, end_customer_name, rule_category]
+            if part.strip()
+        )
+        or "customer_rule"
+    )
 
     actions = st.columns(2)
     with actions[0]:
@@ -332,6 +373,31 @@ def _section_workflow(
         help="例如 TINV 需要 HAND TOOL，TPKG 通常可留空。",
     )
 
+    nw_mode = _safe_weight_mode(sheet_profile.get("nw_mode", "source_is_unit"))
+    gw_mode = _safe_weight_mode(sheet_profile.get("gw_mode", "source_is_unit"))
+
+    if key == "TPKG":
+        st.markdown("#### NW / GW 重量推算")
+        st.caption("若客戶提供的是整批總重量，系統會先除以箱數後再放進 tempArray，避免 OP 後段報表再乘一次。")
+        weight_modes = list(WEIGHT_MODE_LABELS.keys())
+        weight_cols = st.columns(2)
+        with weight_cols[0]:
+            nw_mode = st.selectbox(
+                "NW 淨重來源",
+                weight_modes,
+                index=weight_modes.index(nw_mode),
+                format_func=lambda mode: WEIGHT_MODE_LABELS[mode],
+                key=f"{key}_nw_mode",
+            )
+        with weight_cols[1]:
+            gw_mode = st.selectbox(
+                "GW 毛重來源",
+                weight_modes,
+                index=weight_modes.index(gw_mode),
+                format_func=lambda mode: WEIGHT_MODE_LABELS[mode],
+                key=f"{key}_gw_mode",
+            )
+
     selected_table = _select_source_table_for_section(key, parsed_tables)
     raw_df = selected_table.dataframe
     if selected_table.note:
@@ -404,6 +470,8 @@ def _section_workflow(
         output_header_row=int(output_header_row),
         output_data_start_row=int(output_data_start_row),
         fixed_title=fixed_title.strip(),
+        nw_mode=nw_mode,
+        gw_mode=gw_mode,
     )
     profile = {
         "source_sheet": rule.source_sheet_name,
@@ -413,6 +481,8 @@ def _section_workflow(
         "output_header_row": rule.output_header_row,
         "output_data_start_row": rule.output_data_start_row,
         "fixed_title": rule.fixed_title,
+        "nw_mode": rule.nw_mode,
+        "gw_mode": rule.gw_mode,
         "mappings": [
             {
                 "target": mapping.target,
@@ -543,6 +613,25 @@ def _sheet_profile(imported_profile: dict[str, Any], key: str) -> dict[str, Any]
     return {}
 
 
+def _classification_profile(imported_profile: dict[str, Any]) -> dict[str, Any]:
+    classification = imported_profile.get("classification", {})
+    if not isinstance(classification, dict):
+        classification = {}
+
+    tags = classification.get("tags", [])
+    if isinstance(tags, str):
+        tags = _split_tags(tags)
+    elif not isinstance(tags, list):
+        tags = []
+
+    return {
+        "end_customer_name": str(classification.get("end_customer_name", "")),
+        "rule_category": str(classification.get("rule_category", "")),
+        "tags": [str(tag) for tag in tags if str(tag).strip()],
+        "note": str(classification.get("note", "")),
+    }
+
+
 def _columns_from_sheet_profile(sheet_profile: dict[str, Any]) -> list[TemplateColumn]:
     mappings = sheet_profile.get("mappings", [])
     if not isinstance(mappings, list):
@@ -588,6 +677,27 @@ def _bounded_int(value: object, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         number = minimum
     return max(minimum, min(maximum, number))
+
+
+def _safe_weight_mode(value: object) -> str:
+    mode = str(value or "source_is_unit")
+    if mode in WEIGHT_MODE_LABELS:
+        return mode
+    return "source_is_unit"
+
+
+def _split_tags(value: object) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value or "").replace("，", ",").replace("、", ",").split(",")
+
+    tags: list[str] = []
+    for item in raw_items:
+        tag = str(item).strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def _safe_file_stem(value: str) -> str:

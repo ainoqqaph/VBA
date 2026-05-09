@@ -71,8 +71,17 @@ class OutputTemplateConfig:
 
 
 def main() -> None:
-    st.title("Invoice / Packing List VBA 產生器")
-    st.caption("同一份 OP 最終範本可分別偵測 TINV 和 TPKG，避免把 400 多個客戶格式寫死。")
+    _inject_soft_theme_css()
+    st.markdown(
+        """
+        <section class="app-hero">
+            <p class="app-kicker">報關文件清洗工具</p>
+            <h1>Invoice / Packing List VBA 產生器</h1>
+            <p>把客戶原始 invoice、packing list 對應成 OP 可維護的 VBA 規則。</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
     imported_profile = _load_profile_from_sidebar()
 
@@ -226,6 +235,190 @@ def main() -> None:
         )
 
     st.code(vba_code, language="vbnet")
+
+
+def _inject_soft_theme_css() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --soft-bg: #fbf7f2;
+            --soft-panel: #fffdf9;
+            --soft-panel-strong: #ffffff;
+            --soft-line: #eaded3;
+            --soft-muted: #766d64;
+            --soft-text: #302c28;
+            --soft-accent: #b96f5a;
+            --soft-accent-dark: #8f4f3f;
+            --soft-sage: #e8f0e8;
+            --soft-sky: #edf3f6;
+        }
+
+        html,
+        body,
+        [data-testid="stAppViewContainer"] {
+            background: var(--soft-bg);
+            color: var(--soft-text);
+        }
+
+        [data-testid="stAppViewContainer"] > .main {
+            background: var(--soft-bg);
+        }
+
+        .block-container {
+            max-width: 1280px;
+            padding-top: 1.6rem;
+            padding-bottom: 3rem;
+        }
+
+        .app-hero {
+            padding: 1.25rem 0 1.1rem;
+            border-bottom: 1px solid var(--soft-line);
+            margin-bottom: 1.25rem;
+        }
+
+        .app-hero h1 {
+            margin: 0.15rem 0 0.4rem;
+            color: var(--soft-text);
+            font-size: 2.25rem;
+            line-height: 1.18;
+            letter-spacing: 0;
+            font-weight: 760;
+        }
+
+        .app-hero p {
+            margin: 0;
+            color: var(--soft-muted);
+            font-size: 1.02rem;
+        }
+
+        .app-kicker {
+            color: var(--soft-accent-dark) !important;
+            font-size: 0.86rem !important;
+            font-weight: 760;
+            letter-spacing: 0 !important;
+        }
+
+        [data-testid="stSidebar"] {
+            background: #fffaf5;
+            border-right: 1px solid var(--soft-line);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+            color: var(--soft-text);
+        }
+
+        h2, h3 {
+            color: var(--soft-text);
+            letter-spacing: 0;
+        }
+
+        div[data-testid="stTabs"] button {
+            color: var(--soft-muted);
+            font-weight: 700;
+            padding-top: 0.75rem;
+            padding-bottom: 0.75rem;
+        }
+
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            color: var(--soft-accent-dark);
+            border-bottom-color: var(--soft-accent);
+        }
+
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--soft-line);
+            border-radius: 8px;
+            background: var(--soft-panel);
+        }
+
+        div[data-testid="stFileUploader"] section {
+            background: var(--soft-panel-strong);
+            border: 1px dashed #d7b9a9;
+            border-radius: 8px;
+            padding: 1rem;
+        }
+
+        div[data-testid="stFileUploader"] section:hover {
+            border-color: var(--soft-accent);
+            background: #fffaf7;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 8px;
+            border: 1px solid var(--soft-line);
+        }
+
+        div[data-testid="stDataFrame"],
+        div[data-testid="stTable"] {
+            border: 1px solid var(--soft-line);
+            border-radius: 8px;
+            overflow: hidden;
+            background: var(--soft-panel-strong);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            border-radius: 8px;
+            border: 1px solid #c88976;
+            background: var(--soft-accent);
+            color: #ffffff;
+            font-weight: 760;
+            box-shadow: none;
+            min-height: 2.65rem;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: var(--soft-accent-dark);
+            background: var(--soft-accent-dark);
+            color: #ffffff;
+        }
+
+        [data-baseweb="input"] input,
+        [data-baseweb="textarea"] textarea,
+        [data-baseweb="select"] > div,
+        div[data-testid="stNumberInput"] input {
+            background-color: var(--soft-panel-strong);
+            border-color: #dfcec2;
+            color: var(--soft-text);
+            border-radius: 8px;
+        }
+
+        [data-baseweb="input"] input:focus,
+        [data-baseweb="textarea"] textarea:focus,
+        [data-baseweb="select"] > div:focus-within,
+        div[data-testid="stNumberInput"] input:focus {
+            border-color: var(--soft-accent);
+            box-shadow: 0 0 0 1px rgba(185, 111, 90, 0.18);
+        }
+
+        code,
+        pre {
+            border-radius: 8px !important;
+        }
+
+        .stRadio [role="radiogroup"] {
+            background: var(--soft-sky);
+            border: 1px solid #dbe6ea;
+            border-radius: 8px;
+            padding: 0.35rem 0.5rem;
+        }
+
+        @media (max-width: 720px) {
+            .block-container {
+                padding-left: 1rem;
+                padding-right: 1rem;
+            }
+
+            .app-hero h1 {
+                font-size: 1.75rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _load_profile_from_sidebar() -> dict[str, Any]:

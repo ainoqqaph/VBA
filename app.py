@@ -47,7 +47,7 @@ DEFAULT_SECTIONS = {
         "source_sheet": "Inv",
         "output_sheet": "Tinv",
         "procedure": "CleanTINV",
-        "fixed_title": "HAND TOOL",
+        "fixed_title": "",
     },
     "TPKG": {
         "label": "TPKG / Packing List",
@@ -66,36 +66,37 @@ WEIGHT_MODE_LABELS = {
 
 OP_TEMP_ARRAY_RUNTIME_RULES = {
     "TINV": {
-        "header_row": 3,
-        "data_start_row": 4,
+        "header_row": 10,
+        "data_start_row": 12,
         "mappings": [
-            ("PO No.", 1),
-            ("Item No.", 3),
-            ("Line No.", 4),
-            ("Description of Goods", 6),
-            ("Quantity", 7),
+            ("PO No.", 0),
+            ("Item No.", 7),
+            ("Line No.", 0),
+            ("Description of Goods", 9),
+            ("Quantity", 11),
             ("Unit", 0),
-            ("Unit Price", 8),
-            ("Amount", 9),
-            ("Brand", 2),
-            ("Customer Item", 3),
+            ("Unit Price", 13),
+            ("Amount", 14),
+            ("Brand", 0),
+            ("Customer Item", 7),
         ],
     },
     "TPKG": {
-        "header_row": 3,
-        "data_start_row": 4,
+        "header_row": 10,
+        "data_start_row": 12,
         "mappings": [
-            ("Customer PO", 1),
-            ("PO No.", 1),
-            ("Item No.", 3),
-            ("Description of Goods", 6),
-            ("Quantity", 7),
-            ("Unit Qty", 10),
+            ("Customer PO", 0),
+            ("PO No.", 0),
+            ("Carton No", 5),
+            ("CTN", 6),
+            ("Item No", 7),
+            ("Description of Goods", 9),
+            ("Quantity", 11),
+            ("Unit Qty", 0),
             ("Unit", 0),
-            ("CTN", 14),
-            ("Net Weight", 11),
-            ("Gross Weight", 12),
-            ("Measurement", 13),
+            ("Net Weight", 15),
+            ("Gross Weight", 16),
+            ("Measurement", 0),
         ],
     },
 }
@@ -159,7 +160,7 @@ def main() -> None:
             rule_tags = st.text_input(
                 "搜尋標籤",
                 value=", ".join(imported_classification.get("tags", [])),
-                placeholder="例如：GW總重, NW單箱, HAND TOOL",
+                placeholder="例如：GW總重, NW單箱, 易昇",
             )
             rule_note = st.text_area(
                 "規則備註",
@@ -241,9 +242,15 @@ def main() -> None:
 
     st.subheader("C. 產生 VBA 與客戶規則")
     if vba_output_mode.startswith("OP tempArray"):
-        vba_code = generate_op_temp_array_vba(rules, lookup_mode="position")
+        legacy_menu_items = _legacy_menu_items_from_classification(rule_category, end_customer_name)
+        vba_code = generate_op_temp_array_vba(
+            rules,
+            lookup_mode="position",
+            menu_items=legacy_menu_items,
+        )
         vba_file_suffix = "OP_TempArrays"
     else:
+        legacy_menu_items = []
         vba_code = generate_workbook_vba(rules, lookup_mode=lookup_mode)
         vba_file_suffix = "TINV_TPKG"
 
@@ -255,6 +262,7 @@ def main() -> None:
             "rule_category": rule_category.strip(),
             "tags": _split_tags(rule_tags),
             "note": rule_note.strip(),
+            "legacy_menu_items": legacy_menu_items,
         },
         "lookup_mode": lookup_mode,
         "vba_output_mode": vba_output_mode,
@@ -295,14 +303,15 @@ def _inject_soft_theme_css() -> None:
         """
         <style>
         :root {
-            --soft-bg: #fbf7f2;
-            --soft-panel: #fffdf9;
-            --soft-panel-strong: #ffffff;
-            --soft-line: #eaded3;
-            --soft-muted: #766d64;
-            --soft-text: #302c28;
-            --soft-accent: #b96f5a;
-            --soft-accent-dark: #8f4f3f;
+            --soft-bg: #f7f3ec;
+            --soft-panel: #fffaf1;
+            --soft-panel-strong: #fffefa;
+            --soft-line: #ded4c6;
+            --soft-muted: #667085;
+            --soft-text: #1f2933;
+            --soft-accent: #b86a4b;
+            --soft-accent-dark: #7a3f2b;
+            --soft-accent-soft: #f2dfd5;
             --soft-sage: #e8f0e8;
             --soft-sky: #edf3f6;
         }
@@ -316,6 +325,16 @@ def _inject_soft_theme_css() -> None:
 
         [data-testid="stAppViewContainer"] > .main {
             background: var(--soft-bg);
+        }
+
+        header[data-testid="stHeader"] {
+            background: rgba(247, 243, 236, 0.96);
+            border-bottom: 1px solid var(--soft-line);
+        }
+
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"] {
+            background: transparent;
         }
 
         .block-container {
@@ -353,8 +372,16 @@ def _inject_soft_theme_css() -> None:
         }
 
         [data-testid="stSidebar"] {
-            background: #fffaf5;
+            background: #fdf7ed;
             border-right: 1px solid var(--soft-line);
+        }
+
+        [data-testid="stSidebar"] *,
+        [data-testid="stWidgetLabel"] p,
+        [data-testid="stMarkdownContainer"],
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] span {
+            color: var(--soft-text);
         }
 
         [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
@@ -387,33 +414,56 @@ def _inject_soft_theme_css() -> None:
 
         div[data-testid="stFileUploader"] section {
             background: var(--soft-panel-strong);
-            border: 1px dashed #d7b9a9;
-            border-radius: 8px;
+            border: 1px dashed #c9a28e;
+            border-radius: 12px;
             padding: 1rem;
         }
 
         div[data-testid="stFileUploader"] section:hover {
             border-color: var(--soft-accent);
-            background: #fffaf7;
+            background: #fff8ee;
+        }
+
+        div[data-testid="stFileUploader"] small,
+        div[data-testid="stFileUploader"] span,
+        div[data-testid="stFileUploader"] p {
+            color: var(--soft-muted) !important;
+        }
+
+        div[data-testid="stFileUploaderFile"] {
+            background: var(--soft-accent-soft) !important;
+            border: 1px solid #d7b7a8 !important;
+            border-radius: 10px !important;
+        }
+
+        div[data-testid="stFileUploaderFile"] *,
+        div[data-testid="stFileUploaderFile"] svg {
+            color: var(--soft-text) !important;
+            fill: var(--soft-text) !important;
         }
 
         div[data-testid="stAlert"] {
-            border-radius: 8px;
+            border-radius: 10px;
             border: 1px solid var(--soft-line);
         }
 
         div[data-testid="stDataFrame"],
         div[data-testid="stTable"] {
             border: 1px solid var(--soft-line);
-            border-radius: 8px;
+            border-radius: 10px;
             overflow: hidden;
             background: var(--soft-panel-strong);
         }
 
+        div[data-testid="stDataFrame"] *,
+        div[data-testid="stTable"] * {
+            color: var(--soft-text);
+        }
+
         .stButton > button,
         .stDownloadButton > button {
-            border-radius: 8px;
-            border: 1px solid #c88976;
+            border-radius: 10px;
+            border: 1px solid var(--soft-accent);
             background: var(--soft-accent);
             color: #ffffff;
             font-weight: 760;
@@ -435,7 +485,19 @@ def _inject_soft_theme_css() -> None:
             background-color: var(--soft-panel-strong);
             border-color: #dfcec2;
             color: var(--soft-text);
-            border-radius: 8px;
+            border-radius: 10px;
+        }
+
+        [data-baseweb="input"] input::placeholder,
+        [data-baseweb="textarea"] textarea::placeholder {
+            color: #9a8c7e;
+            opacity: 1;
+        }
+
+        [data-baseweb="select"] span,
+        [data-baseweb="select"] svg,
+        div[role="listbox"] * {
+            color: var(--soft-text) !important;
         }
 
         [data-baseweb="input"] input:focus,
@@ -452,10 +514,15 @@ def _inject_soft_theme_css() -> None:
         }
 
         .stRadio [role="radiogroup"] {
-            background: var(--soft-sky);
-            border: 1px solid #dbe6ea;
-            border-radius: 8px;
+            background: #f3ede4;
+            border: 1px solid var(--soft-line);
+            border-radius: 10px;
             padding: 0.35rem 0.5rem;
+        }
+
+        .stRadio label,
+        .stCheckbox label {
+            color: var(--soft-text) !important;
         }
 
         @media (max-width: 720px) {
@@ -519,11 +586,13 @@ def _target_template_section(imported_profile: dict[str, Any]) -> dict[str, Outp
         with st.expander("已偵測到的最終範本候選"):
             st.write([candidate.label for candidate in candidates])
 
+        selected_candidates: dict[str, TemplateCandidate] = {}
         selector_cols = st.columns(2)
         for column, key in zip(selector_cols, DEFAULT_SECTIONS):
             with column:
                 selected = _select_template_candidate_for_section(key, candidates)
                 if selected:
+                    selected_candidates[key] = selected
                     configs[key] = OutputTemplateConfig(
                         key=key,
                         columns=selected.columns,
@@ -531,6 +600,17 @@ def _target_template_section(imported_profile: dict[str, Any]) -> dict[str, Outp
                         data_start_row=selected.data_start_row,
                         label=selected.label,
                     )
+
+        if selected_candidates:
+            st.markdown("#### 已選範本欄位對照")
+            preview_cols = st.columns(2)
+            for column, key in zip(preview_cols, DEFAULT_SECTIONS):
+                selected = selected_candidates.get(key)
+                with column:
+                    if selected is None:
+                        st.info(f"{key} 未選擇最終格式。")
+                        continue
+                    st.caption(configs[key].label)
                     st.dataframe(
                         build_template_preview(selected.columns, selected.header_row),
                         use_container_width=True,
@@ -612,34 +692,14 @@ def _section_workflow(
         "固定補入的大標題",
         value=str(sheet_profile.get("fixed_title", defaults["fixed_title"])),
         key=f"{key}_fixed_title",
-        help="例如 TINV 需要 HAND TOOL，TPKG 通常可留空。",
+        help="此欄預設不補入；若客戶需要大標題，可手動輸入，例如 HAND TOOL。",
     )
 
-    nw_mode = _safe_weight_mode(sheet_profile.get("nw_mode", "source_is_unit"))
-    gw_mode = _safe_weight_mode(sheet_profile.get("gw_mode", "source_is_unit"))
-    multi_box_mode = bool(sheet_profile.get("multi_box_mode", False))
+    nw_mode = "source_is_unit"
+    gw_mode = "source_is_unit"
+    multi_box_mode = bool(sheet_profile.get("multi_box_mode", key == "TPKG"))
 
     if key == "TPKG":
-        st.markdown("#### NW / GW 重量推算")
-        st.caption("若客戶提供的是整批總重量，系統會先除以箱數後再放進 tempArray，避免 OP 後段報表再乘一次。")
-        weight_modes = list(WEIGHT_MODE_LABELS.keys())
-        weight_cols = st.columns(2)
-        with weight_cols[0]:
-            nw_mode = st.selectbox(
-                "NW 淨重來源",
-                weight_modes,
-                index=weight_modes.index(nw_mode),
-                format_func=lambda mode: WEIGHT_MODE_LABELS[mode],
-                key=f"{key}_nw_mode",
-            )
-        with weight_cols[1]:
-            gw_mode = st.selectbox(
-                "GW 毛重來源",
-                weight_modes,
-                index=weight_modes.index(gw_mode),
-                format_func=lambda mode: WEIGHT_MODE_LABELS[mode],
-                key=f"{key}_gw_mode",
-            )
         multi_box_mode = st.checkbox(
             "啟用多箱處理",
             value=multi_box_mode,
@@ -1094,6 +1154,33 @@ def _split_tags(value: object) -> list[str]:
         if tag and tag not in tags:
             tags.append(tag)
     return tags
+
+
+def _split_legacy_menu_items(value: object) -> list[str]:
+    text = str(value or "")
+    for delimiter in ("\uff0c", "\u3001", "\uff1b", ";", "/", "|", "\n"):
+        text = text.replace(delimiter, ",")
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for raw_item in text.split(","):
+        item = raw_item.strip()
+        key = item.casefold()
+        if item and key not in seen:
+            items.append(item)
+            seen.add(key)
+    return items
+
+
+def _legacy_menu_items_from_classification(rule_category: object, end_customer_name: object) -> list[str]:
+    items = _split_legacy_menu_items(rule_category)
+    if not items:
+        items = _split_legacy_menu_items(end_customer_name)
+    if not items:
+        return ["Default"]
+    if all(item.casefold() != "default" for item in items):
+        items.insert(0, "Default")
+    return items
 
 
 def _safe_file_stem(value: str) -> str:

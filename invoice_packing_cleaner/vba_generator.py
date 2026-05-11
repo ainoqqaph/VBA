@@ -220,6 +220,7 @@ Private Function NormalizeKey(ByVal value As Variant) As String
 
     NormalizeKey = text
 End Function
+
 '''
 
 
@@ -358,16 +359,19 @@ Private Function NormalizeKey(ByVal value As Variant) As String
 
     NormalizeKey = text
 End Function
+
 '''
 
 
-def generate_op_temp_array_vba(
+def _generate_streamlit_compat_op_temp_array_vba(
     rules: list[SheetTransformRule],
     lookup_mode: str = "header",
+    menu_items: list[str] | None = None,
 ) -> str:
     inv_rule = _find_rule(rules, "TINV")
     pkg_rule = _find_rule(rules, "TPKG")
     multi_box_mode = bool(pkg_rule.multi_box_mode) if pkg_rule else False
+    legacy_menu_items = _normalize_legacy_menu_items(menu_items)
     procedures: list[str] = []
     calls: list[str] = []
 
@@ -377,7 +381,7 @@ def generate_op_temp_array_vba(
             f'''    Set Inv = ResolveSourceSheet(Array({_vba_string(inv_rule.source_sheet_name)}, "Inv+Pkg", "Inv", "Invoice", "INVOICE"))
     If Not Inv Is Nothing Then
         If WorksheetFunction.CountA(Inv.UsedRange) <> 0 Then
-            Call TINV(Inv, GetOrCreateSheet({_vba_string(inv_rule.output_sheet_name)}))
+            Call Streamlit_TINV(Inv, GetOrCreateSheet({_vba_string(inv_rule.output_sheet_name)}))
         Else
             MsgBox "無法提取 TINV 資料，請確認 " & {_vba_string(inv_rule.source_sheet_name)} & " 已匯入", vbExclamation
         End If
@@ -392,7 +396,7 @@ def generate_op_temp_array_vba(
             f'''    Set Pkg = ResolveSourceSheet(Array({_vba_string(pkg_rule.source_sheet_name)}, "Inv+Pkg", "Pkg", "Packing", "PACKING"))
     If Not Pkg Is Nothing Then
         If WorksheetFunction.CountA(Pkg.UsedRange) <> 0 Then
-            Call TPKG(Pkg, GetOrCreateSheet({_vba_string(pkg_rule.output_sheet_name)}), GetOrCreateSheet("Tinv"))
+            Call Streamlit_TPKG(Pkg, GetOrCreateSheet({_vba_string(pkg_rule.output_sheet_name)}), GetOrCreateSheet("Tinv"))
         Else
             MsgBox "無法提取 TPKG 資料，請確認 " & {_vba_string(pkg_rule.source_sheet_name)} & " 已匯入", vbExclamation
         End If
@@ -421,29 +425,33 @@ def generate_op_temp_array_vba(
 ' TPKG 固定格式：
 '   tempArray = Array(i, Itemno, Po, QtyArray, NW, GW, DscArray, MS)
 
-Public INVcollection As Collection
-Public PKGcollection As Collection
-
+Private INVcollection As Collection
+Private PKGcollection As Collection
+Private target As Collection
+Private map As Collection
+Private Dst As Worksheet, Tst As Worksheet, Lst As Worksheet
+Private Inv As Worksheet, Pkg As Worksheet, InvPkg As Worksheet
 Private WB As Workbook
-Private Inv As Worksheet
-Private Pkg As Worksheet
 
 Private Const ENABLE_MULTI_BOX_DETAIL As Boolean = {_vba_boolean(multi_box_mode)}
 
-Public Sub Main()
-    Set WB = ThisWorkbook
+Private Sub Streamlit_Main()
+    Set WB = ActiveWorkbook
+    If WB Is Nothing Then Set WB = ThisWorkbook
 {chr(10).join(calls)}
 
     MsgBox "完成：INVcollection=" & CollectionCount(INVcollection) & _
            "，PKGcollection=" & CollectionCount(PKGcollection), vbInformation
 End Sub
 
-Public Sub BuildOPTempArrays()
-    Call Main
+Private Sub Streamlit_BuildOPTempArrays()
+    Call Streamlit_Main
 End Sub
 
-Public Sub ExportOPTempArrayPreview()
-    Call Main
+{_legacy_main_process_vba(legacy_menu_items)}
+
+Private Sub Streamlit_ExportOPTempArrayPreview()
+    Call Streamlit_Main
     Call WriteCollectionPreview("Debug_INVcollection", INVcollection, Array("i", "Itemno", "Po", "QtyArray", "Upce", "Amt", "DscArray", "Title", "HS", "BRAND", "CusItemNo"))
     Call WriteCollectionPreview("Debug_PKGcollection", PKGcollection, Array("i", "Itemno", "Po", "QtyArray", "NW", "GW", "DscArray", "MS"))
     MsgBox "已輸出 Debug_INVcollection / Debug_PKGcollection，可先給 OP 檢查 tempArray 內容。", vbInformation
@@ -452,9 +460,9 @@ End Sub
 {chr(10).join(procedures)}
 
 ' ==============================================================================
-' 【檢查工具】把 Collection 展開成工作表，方便不熟 VBA 的人確認抓值結果。
+' 【常用手動調整區】Private Sub WriteDataTinv
+' 說明：Invoice 最終版寫入與排版邏輯。客戶格式變動時，通常優先檢查這段。
 ' ==============================================================================
-
 Private Sub WriteDataTinv(ByVal ws As Worksheet, ByVal items As Collection)
     Dim item As Variant
     Dim poInfo As Variant
@@ -535,8 +543,10 @@ Private Sub WriteDataTinv(ByVal ws As Worksheet, ByVal items As Collection)
 FinishTinv:
     ws.Rows(1).Font.Bold = True
     ws.Columns.AutoFit
-End Sub
-
+' ==============================================================================
+' 【常用手動調整區】Private Sub WriteDataTpkg
+' 說明：Packing List 最終版寫入、箱號、重量與配對輸出邏輯。
+' ==============================================================================
 Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVal tinvWs As Worksheet)
     Dim i As Long
     Dim k As Long
@@ -569,10 +579,13 @@ Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVa
     Dim lb As Long
     Dim ub As Long
     Dim chkText As String
+    Dim brandText As String
 
     ws.Cells.Clear
-    ws.Range("A1:J1").Value = Array("Ctn NO", "Ctn", "Description", "Qty", "Unit", "N.W.", "G.W.", "Measurement", "Inv NO", "CHK")
+    ws.Range("A1:K1").Value = Array("Ctn NO", "Ctn", "Description", "Qty", "Unit", "N.W.", "G.W.", "Measurement", "Inv NO", "CHK", "BRAND")
+    ws.Columns(1).NumberFormat = "@"
     ws.Columns(3).NumberFormat = "@"
+    ws.Columns(10).NumberFormat = "@"
     ws.Columns(3).HorizontalAlignment = xlLeft
 
     If items Is Nothing Then GoTo FinishTpkg
@@ -606,15 +619,16 @@ Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVa
             unitText = DefaultText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(invItem, 3), 1)), "EACH")
             titleText = CleanCellText(GetSafeArrayValue(GetSafeArrayValue(invItem, 2), 0))
             chkText = BuildCheckTextForItem(invItem)
+            brandText = ValueToDisplayText(GetSafeArrayValue(invItem, 9))
         Else
             descInfo = GetSafeArrayValue(item, 6)
             unitText = DefaultText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(item, 3), 2)), "EACH")
             titleText = CleanCellText(GetSafeArrayValue(GetSafeArrayValue(item, 2), 0))
             chkText = BuildCheckTextForItem(item)
+            brandText = vbNullString
         End If
 
-        If Len(titleText) = 0 Then titleText = "HAND TOOLS"
-        If titleText <> currentTitle Then
+        If Len(titleText) > 0 And titleText <> currentTitle Then
             ws.Cells(r, 3).Value = "^" & Replace(titleText, "^", "") & "^"
             currentTitle = titleText
             r = r + 1
@@ -642,20 +656,20 @@ Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVa
 
         pkgPoInfo = GetSafeArrayValue(item, 2)
         pkgQtyInfo = GetSafeArrayValue(item, 3)
-        ctnText = CleanCellText(GetSafeArrayValue(pkgPoInfo, 2))
-        ctnText = BuildCartonNo(ctnText, ctnText)
         ctnCount = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgPoInfo, 3))))
         If ctnCount <= 0 Then ctnCount = 1
+        ctnText = NormalizeCartonNo(CleanCellText(GetSafeArrayValue(pkgPoInfo, 2)), ctnCount)
         totalQty = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgQtyInfo, 0))))
         qtyPerCtn = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgQtyInfo, 1))))
         If totalQty <= 0 Then totalQty = qtyPerCtn
+        If qtyPerCtn <= 0 And ctnCount > 0 And totalQty > 0 Then qtyPerCtn = totalQty / ctnCount
         If qtyPerCtn <= 0 Then qtyPerCtn = totalQty
         nwUnit = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(item, 4))))
         gwUnit = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(item, 5))))
         totalNW = Round(nwUnit * ctnCount, 2)
         totalGW = Round(gwUnit * ctnCount * ratioGW, 2)
 
-        ws.Cells(r, 1).Value = ctnText
+        ws.Cells(r, 1).Value = SafeExcelText(ctnText)
         ws.Cells(r, 2).Value = ctnCount
         If IsArray(descInfo) And UBound(descInfo) >= LBound(descInfo) + 2 Then
             ws.Cells(r, 3).Value = CleanCellText(GetSafeArrayValue(descInfo, LBound(descInfo) + 2))
@@ -664,6 +678,7 @@ Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVa
         End If
         ws.Cells(r, 5).Value = unitText
         ws.Cells(r, 10).Value = chkText
+        ws.Cells(r, 11).Value = brandText
 
         If matchedIndex > 0 Then
             ws.Cells(r, 9).Value = matchedIndex
@@ -701,6 +716,7 @@ Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVa
     Next i
 
 FinishTpkg:
+    If Not tinvWs Is Nothing Then Call InvNo(ws, tinvWs)
     ws.Rows(1).Font.Bold = True
     ws.Columns(3).HorizontalAlignment = xlLeft
     ws.Columns("D:H").HorizontalAlignment = xlRight
@@ -776,25 +792,50 @@ Private Function BuildJoinedCheckText(ByVal arr As Variant, ByVal tailValue As V
     BuildJoinedCheckText = text
 End Function
 
-Private Function FindInvoiceNo(ByVal ws As Worksheet, ByVal itemNo As String) As String
-    Dim found As Range
+' ==============================================================================
+' 【常用手動調整區】Private Sub InvNo
+' 說明：透過 CHK 將 Tinv 的 NO. 回寫到 Tpkg 的 Inv NO 欄。
+' ==============================================================================
+Private Sub InvNo(ByVal tpkgWs As Worksheet, ByVal tinvWs As Worksheet)
+    Dim colCHKT As Long
+    Dim colCHKL As Long
+    Dim colInvNoT As Long
+    Dim colInvNoL As Long
+    Dim lastRowT As Long
+    Dim lastRowL As Long
+    Dim i As Long
+    Dim chkValue As String
+    Dim dict As Object
 
-    itemNo = CleanCellText(itemNo)
-    If Len(itemNo) = 0 Then
-        FindInvoiceNo = "找不到"
-        Exit Function
-    End If
+    colCHKT = HeaderColumn(tpkgWs, "CHK", 1)
+    colCHKL = HeaderColumn(tinvWs, "CHK", 1)
+    colInvNoT = HeaderColumn(tpkgWs, "Inv NO", 1)
+    colInvNoL = HeaderColumn(tinvWs, "NO.", 1)
+    If colCHKT = 0 Or colCHKL = 0 Or colInvNoT = 0 Or colInvNoL = 0 Then Exit Sub
 
-    On Error Resume Next
-    Set found = ws.Columns(10).Find(What:=itemNo, LookIn:=xlValues, LookAt:=xlWhole)
-    On Error GoTo 0
+    Set dict = CreateObject("Scripting.Dictionary")
+    lastRowL = tinvWs.Cells(tinvWs.Rows.Count, colCHKL).End(xlUp).Row
+    For i = 2 To lastRowL
+        chkValue = CleanCellText(tinvWs.Cells(i, colCHKL).Value)
+        If Len(chkValue) > 0 Then
+            If Not dict.Exists(chkValue) Then dict.Add chkValue, tinvWs.Cells(i, colInvNoL).Value
+        End If
+    Next i
 
-    If found Is Nothing Then
-        FindInvoiceNo = "找不到"
-    Else
-        FindInvoiceNo = CleanCellText(ws.Cells(found.Row, 8).Value)
-    End If
-End Function
+    lastRowT = tpkgWs.Cells(tpkgWs.Rows.Count, colCHKT).End(xlUp).Row
+    For i = 2 To lastRowT
+        chkValue = CleanCellText(tpkgWs.Cells(i, colCHKT).Value)
+        If Len(chkValue) > 0 Then
+            If dict.Exists(chkValue) Then
+                tpkgWs.Cells(i, colInvNoT).Value = dict(chkValue)
+                tpkgWs.Cells(i, colInvNoT).Interior.Pattern = xlNone
+            Else
+                tpkgWs.Cells(i, colInvNoT).Value = "找不到"
+                tpkgWs.Cells(i, colInvNoT).Interior.Color = vbYellow
+            End If
+        End If
+    Next i
+End Sub
 
 Private Function MultiplyNumberText(ByVal valueText As String, ByVal factorText As String) As String
     Dim valueNumber As Double
@@ -866,29 +907,52 @@ End Function
 ' ==============================================================================
 
 Private Function GetOrCreateSheet(ByVal sheetName As String) As Worksheet
+    Dim book As Workbook
+
+    Set book = WorkingWorkbook()
     On Error Resume Next
-    Set GetOrCreateSheet = ThisWorkbook.Worksheets(sheetName)
+    Set GetOrCreateSheet = book.Worksheets(sheetName)
     On Error GoTo 0
 
     If GetOrCreateSheet Is Nothing Then
-        Set GetOrCreateSheet = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        Set GetOrCreateSheet = book.Worksheets.Add(After:=book.Worksheets(book.Worksheets.Count))
         GetOrCreateSheet.Name = sheetName
     End If
+End Function
+
+Private Function WorkingWorkbook() As Workbook
+    If WB Is Nothing Then
+        On Error Resume Next
+        Set WB = ActiveWorkbook
+        On Error GoTo 0
+        If WB Is Nothing Then Set WB = ThisWorkbook
+    End If
+
+    Set WorkingWorkbook = WB
 End Function
 
 Private Function ResolveSourceSheet(ByVal sheetNames As Variant) As Worksheet
     Dim i As Long
     Dim sheetName As String
+    Dim book As Workbook
+    Dim firstExisting As Worksheet
+
+    Set book = WorkingWorkbook()
 
     For i = LBound(sheetNames) To UBound(sheetNames)
         sheetName = CleanCellText(CStr(sheetNames(i)))
         If Len(sheetName) > 0 Then
             If SheetExists(sheetName) Then
-                Set ResolveSourceSheet = ThisWorkbook.Worksheets(sheetName)
-                Exit Function
+                If firstExisting Is Nothing Then Set firstExisting = book.Worksheets(sheetName)
+                If WorksheetFunction.CountA(book.Worksheets(sheetName).UsedRange) <> 0 Then
+                    Set ResolveSourceSheet = book.Worksheets(sheetName)
+                    Exit Function
+                End If
             End If
         End If
     Next i
+
+    If Not firstExisting Is Nothing Then Set ResolveSourceSheet = firstExisting
 End Function
 
 Private Sub ResolveSourceColumns(ByVal ws As Worksheet, ByVal headerRow As Long, _
@@ -988,6 +1052,97 @@ Private Function BuildCartonNo(ByVal ctnText As String, ByVal fallbackText As St
     End If
 End Function
 
+Private Function NormalizeDateLikeCartonText(ByVal value As String) As String
+    Dim text As String
+    Dim parts As Variant
+    Dim dayParts As Variant
+    Dim monthPart As String
+    Dim dayPart As String
+    Dim monthNo As Long
+
+    text = Replace(CleanCellText(value), " ", "")
+    If Len(text) = 0 Then Exit Function
+
+    If InStr(1, text, "月", vbTextCompare) > 0 And InStr(1, text, "日", vbTextCompare) > 0 Then
+        parts = Split(text, "月")
+        If UBound(parts) >= 1 Then
+            monthPart = CleanNumberText(CStr(parts(0)))
+            dayParts = Split(CStr(parts(1)), "日")
+            dayPart = CleanNumberText(CStr(dayParts(0)))
+            If Val(monthPart) > 0 And Val(dayPart) > 0 Then
+                NormalizeDateLikeCartonText = NumberToText(Val(monthPart)) & "-" & NumberToText(Val(dayPart))
+                Exit Function
+            End If
+        End If
+    End If
+
+    If InStr(1, text, "-", vbTextCompare) > 0 Then
+        parts = Split(text, "-")
+        If UBound(parts) >= 1 Then
+            monthNo = MonthNameToNumber(CStr(parts(0)))
+            If monthNo > 0 Then
+                dayPart = CleanNumberText(CStr(parts(1)))
+                If Val(dayPart) > 0 Then
+                    NormalizeDateLikeCartonText = NumberToText(monthNo) & "-" & NumberToText(Val(dayPart))
+                    Exit Function
+                End If
+            End If
+        End If
+    End If
+
+    NormalizeDateLikeCartonText = text
+End Function
+
+Private Function MonthNameToNumber(ByVal value As String) As Long
+    value = LCase$(Left$(CleanCellText(value), 3))
+    Select Case value
+        Case "jan": MonthNameToNumber = 1
+        Case "feb": MonthNameToNumber = 2
+        Case "mar": MonthNameToNumber = 3
+        Case "apr": MonthNameToNumber = 4
+        Case "may": MonthNameToNumber = 5
+        Case "jun": MonthNameToNumber = 6
+        Case "jul": MonthNameToNumber = 7
+        Case "aug": MonthNameToNumber = 8
+        Case "sep": MonthNameToNumber = 9
+        Case "oct": MonthNameToNumber = 10
+        Case "nov": MonthNameToNumber = 11
+        Case "dec": MonthNameToNumber = 12
+    End Select
+End Function
+
+Private Function NormalizeCartonNo(ByVal cartonText As String, ByVal ctnCount As Double) As String
+    Dim rawText As String
+    Dim parts As Variant
+    Dim startNo As Double
+    Dim endNo As Double
+
+    rawText = NormalizeDateLikeCartonText(Replace(CleanCellText(cartonText), " ", ""))
+    If Len(rawText) = 0 Then
+        NormalizeCartonNo = BuildCartonNo(NumberToText(ctnCount), NumberToText(ctnCount))
+        Exit Function
+    End If
+
+    If InStr(1, rawText, "-", vbTextCompare) > 0 Then
+        NormalizeCartonNo = rawText
+        Exit Function
+    End If
+
+    If InStr(1, rawText, "~", vbTextCompare) > 0 Then
+        parts = Split(rawText, "~")
+        startNo = Val(CleanNumberText(CStr(parts(0))))
+        If UBound(parts) >= 1 Then endNo = Val(CleanNumberText(CStr(parts(1))))
+        If startNo <= 0 Then startNo = 1
+        If endNo <= 0 And ctnCount > 0 Then endNo = startNo + ctnCount - 1
+        If endNo > 0 Then
+            NormalizeCartonNo = NumberToText(startNo) & "-" & NumberToText(endNo)
+            Exit Function
+        End If
+    End If
+
+    NormalizeCartonNo = BuildCartonNo(rawText, rawText)
+End Function
+
 Private Function CartonCountFromRange(ByVal cartonText As String) As Double
     Dim parts As Variant
     Dim firstNo As Double
@@ -1010,42 +1165,6 @@ Private Function CartonCountFromRange(ByVal cartonText As String) As Double
     End If
 End Function
 
-Private Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
-    Dim ws As Worksheet
-    Dim found As Range
-    Dim i As Long
-    Dim textValue As String
-
-    actualVGM = 0
-    actualCBM = 0
-
-    For Each ws In ThisWorkbook.Worksheets
-        Set found = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
-        If Not found Is Nothing Then
-            textValue = CleanNumberText(CStr(found.Offset(0, -1).Value))
-            If Len(textValue) > 0 And Val(textValue) > 0 Then
-                actualVGM = Val(textValue)
-            Else
-                textValue = CleanNumberText(CStr(found.Offset(0, 1).Value))
-                If Len(textValue) > 0 And Val(textValue) > 0 Then actualVGM = Val(textValue)
-            End If
-        End If
-
-        Set found = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
-        If Not found Is Nothing Then
-            For i = 1 To 10
-                textValue = CleanNumberText(CStr(found.Offset(0, i).Value))
-                If Len(textValue) > 0 And Val(textValue) > 0 Then
-                    actualCBM = Val(textValue)
-                    Exit For
-                End If
-            Next i
-        End If
-
-        If actualVGM > 0 And actualCBM > 0 Then Exit For
-    Next ws
-End Sub
-
 Private Function CleanNumberText(ByVal value As String) As String
     Dim i As Long
     Dim ch As String
@@ -1060,6 +1179,19 @@ Private Function CleanNumberText(ByVal value As String) As String
     Next i
 
     CleanNumberText = result
+End Function
+
+Private Function SafeExcelText(ByVal value As Variant) As String
+    Dim text As String
+
+    text = CleanCellText(value)
+    If Len(text) = 0 Then
+        SafeExcelText = vbNullString
+    ElseIf Left$(text, 1) = "'" Then
+        SafeExcelText = text
+    Else
+        SafeExcelText = "'" & text
+    End If
 End Function
 
 Private Function AdjustWeightForTempArray(ByVal weightText As String, ByVal ctnText As String, ByVal calcMode As String) As String
@@ -1113,7 +1245,7 @@ Private Function SheetExists(ByVal sheetName As String) As Boolean
     Dim ws As Worksheet
 
     On Error Resume Next
-    Set ws = ThisWorkbook.Worksheets(sheetName)
+    Set ws = WorkingWorkbook().Worksheets(sheetName)
     On Error GoTo 0
 
     SheetExists = Not ws Is Nothing
@@ -1205,6 +1337,444 @@ Private Function NormalizeKey(ByVal value As Variant) As String
 
     NormalizeKey = text
 End Function
+
+' ==============================================================================
+' 輔助系統：自動跨分頁尋找 VGM 與 CBM 總數
+' ==============================================================================
+Public Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
+    Dim ws As Worksheet
+    Dim fVGM As Range
+    Dim fCBM As Range
+    Dim i As Long
+    Dim textValue As String
+
+    actualVGM = 0
+    actualCBM = 0
+
+    ' 遍歷所有工作表尋找目標字眼。
+    For Each ws In WorkingWorkbook().Worksheets
+        ' 尋找 VGM。通常數值會在 VGM 左方或右方，也可能與 VGM 寫在同一格。
+        Set fVGM = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fVGM Is Nothing Then
+            If fVGM.Column > 1 Then
+                textValue = CleanNumberText(CStr(fVGM.Offset(0, -1).Value))
+                If Len(textValue) > 0 And Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+
+            If actualVGM <= 0 And fVGM.Column < ws.Columns.Count Then
+                textValue = CleanNumberText(CStr(fVGM.Offset(0, 1).Value))
+                If Len(textValue) > 0 And Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+
+            If actualVGM <= 0 Then
+                textValue = CleanNumberText(CStr(fVGM.Value))
+                If Len(textValue) > 0 And Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+        End If
+
+        ' 尋找總材積。依目前樣本，材積數字會在「紙板重」該列右側。
+        Set fCBM = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fCBM Is Nothing Then
+            For i = 1 To 10
+                If fCBM.Column + i <= ws.Columns.Count Then
+                    textValue = CleanNumberText(CStr(fCBM.Offset(0, i).Value))
+                    If Len(textValue) > 0 And Val(textValue) > 0 Then
+                        actualCBM = Val(textValue)
+                        Exit For
+                    End If
+                End If
+            Next i
+        End If
+
+        If actualVGM > 0 And actualCBM > 0 Then Exit For
+    Next ws
+End Sub
+'''
+
+
+def _normalize_legacy_menu_items(menu_items: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for item in menu_items or ["Default"]:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(text)
+
+    return normalized or ["Default"]
+
+
+def _legacy_main_process_vba(menu_items: list[str]) -> str:
+    menu_items_vba = _vba_array_strings(menu_items)
+    menu_items_prompt = " / ".join(menu_items)
+    return f'''' ==============================================================================
+' 【舊版 OP 匯入流程相容入口】
+' 說明：
+'   1. 舊版 Default / PkgSep 轉檔核心已由新版 Streamlit_BuildOPTempArrays 取代。
+'   2. 為避免撞到舊專案原本的 MainProcess，本入口命名為 MainProcess_Streamlit。
+'   3. 若活頁簿內有舊 UserForm「轉檔程序」，會優先使用；沒有表單時改用簡易輸入框。
+'   4. 如果要讓舊按鈕跑新版，請把按鈕指派到 MainProcess_Streamlit。
+' ==============================================================================
+
+Private Function Streamlit_MenuItems() As Variant
+    Streamlit_MenuItems = {menu_items_vba}
+End Function
+
+Public Sub Auto_Open()
+    Set WB = ActiveWorkbook
+    If WB Is Nothing Then Set WB = ThisWorkbook
+    Call Streamlit_BindLegacyButtons
+End Sub
+
+Public Sub MainProcess_Streamlit()
+    Dim userImport As Boolean
+    Dim userSelect As String
+    Dim oldCalculation As XlCalculation
+
+    Set WB = ActiveWorkbook
+    If WB Is Nothing Then Set WB = ThisWorkbook
+    Call Streamlit_BindLegacyButtons
+
+    If Not Streamlit_LegacyGetUserChoice(userSelect, userImport) Then
+        MsgBox "操作已取消。", vbInformation
+        Exit Sub
+    End If
+
+    userSelect = Streamlit_NormalizeLegacyMode(userSelect)
+    If Len(userSelect) = 0 Then
+        MsgBox "未選擇有效分類，請選：" & {_vba_string(menu_items_prompt)}, vbExclamation
+        Exit Sub
+    End If
+
+    On Error GoTo Failed
+    oldCalculation = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    Call Streamlit_EnsureLegacySheets
+
+    If userImport Then
+        Call Streamlit_Cln
+        Select Case Streamlit_ImportModeForChoice(userSelect)
+            Case "Default"
+                If Not Streamlit_ImportInvPkg() Then GoTo CanceledImport
+            Case "PkgSep"
+                If Not Streamlit_ImportInvAndPkg() Then GoTo CanceledImport
+        End Select
+    Else
+        Call Streamlit_Ccln
+    End If
+
+    If Not Streamlit_LegacySourceHasData(userSelect) Then
+        MsgBox "無法提取資料，請確認檔案已匯入或來源分頁已有資料。", vbExclamation
+        GoTo CleanExit
+    End If
+
+    WB.Activate
+    Call Streamlit_BuildOPTempArrays
+
+    If SheetExists("Menu") Then WorkingWorkbook().Worksheets("Menu").Select
+    MsgBox "轉檔完成", vbInformation
+    GoTo CleanExit
+
+CanceledImport:
+    MsgBox "匯入文件失敗或操作已取消。", vbExclamation
+
+CleanExit:
+    Application.ScreenUpdating = True
+    Application.Calculation = oldCalculation
+    Exit Sub
+
+Failed:
+    Application.ScreenUpdating = True
+    Application.Calculation = oldCalculation
+    MsgBox "轉檔失敗：" & Err.Description, vbExclamation
+End Sub
+
+Private Sub Streamlit_BindLegacyButtons()
+    Dim ws As Worksheet
+    Dim shp As Shape
+    Dim actionText As String
+
+    On Error Resume Next
+    For Each ws In WorkingWorkbook().Worksheets
+        For Each shp In ws.Shapes
+            actionText = CStr(shp.OnAction)
+            If Len(actionText) > 0 Then
+                If InStr(1, actionText, "MainProcess", vbTextCompare) > 0 And _
+                   InStr(1, actionText, "MainProcess_Streamlit", vbTextCompare) = 0 Then
+                    shp.OnAction = "MainProcess_Streamlit"
+                End If
+            End If
+        Next shp
+    Next ws
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
+Private Sub Streamlit_Cln()
+    Call Streamlit_EnsureLegacySheets
+    Call Streamlit_ClearSheetData(GetOrCreateSheet("Inv+Pkg"))
+    Call Streamlit_ClearSheetData(GetOrCreateSheet("Inv"))
+    Call Streamlit_ClearSheetData(GetOrCreateSheet("Pkg"))
+    Call Streamlit_Ccln
+End Sub
+
+Private Sub Streamlit_Ccln()
+    Call Streamlit_ClearSheetData(GetOrCreateSheet("Tinv"))
+    Call Streamlit_ClearSheetData(GetOrCreateSheet("Tpkg"))
+    If SheetExists("Debug_INVcollection") Then Call Streamlit_ClearSheetData(GetOrCreateSheet("Debug_INVcollection"))
+    If SheetExists("Debug_PKGcollection") Then Call Streamlit_ClearSheetData(GetOrCreateSheet("Debug_PKGcollection"))
+End Sub
+
+Private Function Streamlit_ImportInvPkg() As Boolean
+    Streamlit_ImportInvPkg = Streamlit_CombineExcelFilesByType(GetOrCreateSheet("Inv+Pkg"), "報關文件", "INV")
+End Function
+
+Private Function Streamlit_ImportInvAndPkg() As Boolean
+    If Not Streamlit_CombineExcelFilesByType(GetOrCreateSheet("Inv"), "Invoice", "INV") Then Exit Function
+    If Not Streamlit_CombineExcelFilesByType(GetOrCreateSheet("Pkg"), "Packing List", "PKG") Then Exit Function
+    Streamlit_ImportInvAndPkg = True
+End Function
+
+Private Function Streamlit_CombineExcelFilesByType(ByVal MasterWS As Worksheet, ByVal dialogTitle As String, _
+                                                   ByVal modeType As String, Optional ByVal KeepImages As Boolean = False) As Boolean
+    Dim fileDialog As FileDialog
+    Dim filePath As Variant
+    Dim sourceBook As Workbook
+    Dim sourceSheet As Worksheet
+    Dim lastRow As Long
+    Dim lastCol As Long
+    Dim startRow As Long
+    Dim copyRows As Long
+    Dim col As Long
+    Dim r As Long
+    Dim shp As Shape
+    Dim isFirstFile As Boolean
+    Dim sheetIndex As Long
+    Dim copyRange As Range
+
+    MsgBox "請選擇 " & dialogTitle, vbInformation
+
+    Set fileDialog = Application.FileDialog(msoFileDialogFilePicker)
+    With fileDialog
+        .Title = dialogTitle
+        .AllowMultiSelect = True
+        .Filters.Clear
+        .Filters.Add "Excel Files", "*.xls; *.xlsx; *.xlsm"
+        If .Show <> -1 Then Exit Function
+    End With
+
+    Call ClearSheetData(MasterWS, KeepImages)
+    startRow = 1
+    isFirstFile = True
+
+    For Each filePath In fileDialog.SelectedItems
+        Set sourceBook = Nothing
+        On Error Resume Next
+        Set sourceBook = Workbooks.Open(CStr(filePath), ReadOnly:=True)
+        On Error GoTo 0
+        If sourceBook Is Nothing Then GoTo NextFile
+
+        sheetIndex = Streamlit_FindSheetByType(sourceBook, modeType)
+        If sheetIndex <= 0 Then
+            Set sourceSheet = sourceBook.Worksheets(1)
+        Else
+            Set sourceSheet = sourceBook.Worksheets(sheetIndex)
+        End If
+
+        With sourceSheet
+            lastRow = LastUsedRow(sourceSheet)
+            lastCol = .UsedRange.Columns.Count
+
+            For col = 1 To lastCol
+                MasterWS.Columns(col).ColumnWidth = .Columns(col).ColumnWidth
+            Next col
+
+            If isFirstFile Then
+                Set copyRange = .Range("A1").Resize(lastRow, lastCol)
+                copyRows = lastRow
+                isFirstFile = False
+            ElseIf lastRow > 1 Then
+                Set copyRange = .Range("A2").Resize(lastRow - 1, lastCol)
+                copyRows = lastRow - 1
+            Else
+                GoTo NextFile
+            End If
+
+            For r = 1 To copyRows
+                MasterWS.Rows(startRow + r - 1).RowHeight = .Rows(IIf(copyRange.Row = 1, r, r + 1)).RowHeight
+            Next r
+
+            copyRange.Copy
+            MasterWS.Cells(startRow, 1).PasteSpecial xlPasteAll
+
+            If KeepImages Then
+                For Each shp In .Shapes
+                    DoEvents
+                    shp.Copy
+                    MasterWS.Paste
+                Next shp
+            End If
+
+            startRow = MasterWS.Cells(MasterWS.Rows.Count, 1).End(xlUp).Row + 1
+        End With
+
+NextFile:
+        If Not sourceBook Is Nothing Then sourceBook.Close False
+    Next filePath
+
+    Application.CutCopyMode = False
+    Streamlit_CombineExcelFilesByType = Streamlit_LegacySheetHasData(MasterWS)
+End Function
+
+Private Function Streamlit_FindSheetByType(ByVal sourceBook As Workbook, ByVal modeType As String) As Long
+    Dim ws As Worksheet
+    Dim modeKey As String
+    Dim nameKey As String
+
+    modeKey = UCase$(CleanCellText(modeType))
+    For Each ws In sourceBook.Worksheets
+        nameKey = UCase$(CleanCellText(ws.Name))
+        Select Case modeKey
+            Case "INV", "INVOICE"
+                If InStr(1, nameKey, "INV", vbTextCompare) > 0 Or _
+                   InStr(1, nameKey, "INVOICE", vbTextCompare) > 0 Then
+                    Streamlit_FindSheetByType = ws.Index
+                    Exit Function
+                End If
+            Case "PKG", "PACKING"
+                If InStr(1, nameKey, "PKG", vbTextCompare) > 0 Or _
+                   InStr(1, nameKey, "PACK", vbTextCompare) > 0 Then
+                    Streamlit_FindSheetByType = ws.Index
+                    Exit Function
+                End If
+        End Select
+    Next ws
+
+    Streamlit_FindSheetByType = -1
+End Function
+
+Private Function Streamlit_LegacyGetUserChoice(ByRef userSelect As String, ByRef userImport As Boolean) As Boolean
+    Dim form As Object
+    Dim options As Variant
+
+    options = Streamlit_MenuItems()
+    On Error GoTo FallbackPrompt
+    Set form = VBA.UserForms.Add("轉檔程序")
+    form.MenuItems = options
+    form.LoadOptions
+    form.Show
+
+    If CBool(form.IsCanceled) Then GoTo UserCanceled
+    userSelect = CStr(form.SelectedValue)
+    userImport = CBool(form.UserChoiceImport)
+    Unload form
+    Streamlit_LegacyGetUserChoice = True
+    Exit Function
+
+UserCanceled:
+    Unload form
+    Exit Function
+
+FallbackPrompt:
+    Err.Clear
+    Streamlit_LegacyGetUserChoice = Streamlit_LegacyPromptUserChoice(userSelect, userImport)
+End Function
+
+Private Function Streamlit_LegacyPromptUserChoice(ByRef userSelect As String, ByRef userImport As Boolean) As Boolean
+    Dim answer As VbMsgBoxResult
+    Dim options As Variant
+
+    options = Streamlit_MenuItems()
+    userSelect = InputBox("請輸入轉檔分類：" & {_vba_string(menu_items_prompt)}, "轉檔程序", CStr(options(LBound(options))))
+    userSelect = Streamlit_NormalizeLegacyMode(userSelect)
+    If Len(userSelect) = 0 Then Exit Function
+
+    answer = MsgBox("是否要匯入檔案？" & vbCrLf & _
+                    "選「否」會使用目前 Inv+Pkg / Inv / Pkg 分頁資料。", _
+                    vbYesNoCancel + vbQuestion, "轉檔程序")
+    If answer = vbCancel Then Exit Function
+
+    userImport = (answer = vbYes)
+    Streamlit_LegacyPromptUserChoice = True
+End Function
+
+Private Function Streamlit_NormalizeLegacyMode(ByVal value As String) As String
+    Dim options As Variant
+    Dim optionValue As Variant
+    Dim normalizedValue As String
+
+    options = Streamlit_MenuItems()
+    normalizedValue = NormalizeKey(value)
+    If Len(normalizedValue) = 0 Then
+        Streamlit_NormalizeLegacyMode = CStr(options(LBound(options)))
+        Exit Function
+    End If
+
+    For Each optionValue In options
+        If normalizedValue = NormalizeKey(CStr(optionValue)) Then
+            Streamlit_NormalizeLegacyMode = CStr(optionValue)
+            Exit Function
+        End If
+    Next optionValue
+
+    Streamlit_NormalizeLegacyMode = vbNullString
+End Function
+
+Private Function Streamlit_ImportModeForChoice(ByVal userSelect As String) As String
+    Select Case UCase$(CleanCellText(userSelect))
+        Case "PKGSEP", "PKG SEP", "PKG_SEP"
+            Streamlit_ImportModeForChoice = "PkgSep"
+        Case Else
+            Streamlit_ImportModeForChoice = "Default"
+    End Select
+End Function
+
+Private Sub Streamlit_EnsureLegacySheets()
+    Dim sheetNames As Variant
+    Dim i As Long
+
+    sheetNames = Array("Menu", "HS", "Inv+Pkg", "Inv", "Pkg", "Tinv", "Tpkg")
+    For i = LBound(sheetNames) To UBound(sheetNames)
+        Call GetOrCreateSheet(CStr(sheetNames(i)))
+    Next i
+
+    Set InvPkg = GetOrCreateSheet("Inv+Pkg")
+    Set Inv = GetOrCreateSheet("Inv")
+    Set Pkg = GetOrCreateSheet("Pkg")
+End Sub
+
+Private Function Streamlit_LegacySourceHasData(ByVal userSelect As String) As Boolean
+    Select Case Streamlit_ImportModeForChoice(userSelect)
+        Case "Default"
+            Streamlit_LegacySourceHasData = Streamlit_LegacySheetHasData(GetOrCreateSheet("Inv+Pkg"))
+        Case "PkgSep"
+            Streamlit_LegacySourceHasData = Streamlit_LegacySheetHasData(GetOrCreateSheet("Inv")) Or _
+                                            Streamlit_LegacySheetHasData(GetOrCreateSheet("Pkg"))
+    End Select
+End Function
+
+Private Function Streamlit_LegacySheetHasData(ByVal ws As Worksheet) As Boolean
+    Streamlit_LegacySheetHasData = (WorksheetFunction.CountA(ws.UsedRange) <> 0)
+End Function
+
+Private Sub Streamlit_ClearSheetData(ByVal ws As Worksheet, Optional ByVal KeepImages As Boolean = False)
+    Dim shp As Shape
+
+    ws.Cells.Clear
+    If Not KeepImages Then
+        For Each shp In ws.Shapes
+            shp.Delete
+        Next shp
+    End If
+End Sub
+
 '''
 
 
@@ -1300,7 +1870,7 @@ def _generate_tinv_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     source_headers = [mapping.source_header for mapping in rule.mappings]
     fallback_cols = [mapping.source_index for mapping in rule.mappings]
 
-    return f'''Private Sub TINV(ByRef Dst As Worksheet, ByRef Tst As Worksheet)
+    return f'''Private Sub Streamlit_TINV(ByRef Dst As Worksheet, ByRef Tst As Worksheet)
     Dim headerRow As Long
     Dim ContentStartRow As Long
     Dim lastRow As Long
@@ -1320,6 +1890,10 @@ def _generate_tinv_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     Call WriteDataTinv(Tst, INVcollection)
 End Sub
 
+' ==============================================================================
+' 【常用手動調整區】Private Sub CollectDataTinv
+' 說明：Invoice 原始資料抓取、欄位清洗與 tempArray 打包邏輯。
+' ==============================================================================
 Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
                             ByVal ContentStartRow As Long, ByVal lastRow As Long)
     Const HEADER_ROW As Long = {max(rule.header_row, 1)}
@@ -1382,7 +1956,7 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             Dsc4 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 4")
             Dsc5 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 5")
             Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("qty", "quantity", "數量")))
-            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "EACH")
+            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "CTN")
             Upce = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit price", "price", "upce", "單價")))
             Amt = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("amount", "total", "金額", "總價")))
             HS = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("hs", "hs code", "稅則", "稅號"))
@@ -1412,7 +1986,7 @@ def _generate_tpkg_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     source_headers = [mapping.source_header for mapping in rule.mappings]
     fallback_cols = [mapping.source_index for mapping in rule.mappings]
 
-    return f'''Private Sub TPKG(ByRef Dst As Worksheet, ByRef Tst As Worksheet, ByRef Lst As Worksheet)
+    return f'''Private Sub Streamlit_TPKG(ByRef Dst As Worksheet, ByRef Tst As Worksheet, ByRef Lst As Worksheet)
     Dim headerRow As Long
     Dim ContentStartRow As Long
     Dim lastRow As Long
@@ -1432,6 +2006,10 @@ def _generate_tpkg_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     Call WriteDataTpkg(Tst, PKGcollection, Lst)
 End Sub
 
+' ==============================================================================
+' 【常用手動調整區】Private Sub CollectDataTpkg
+' 說明：Packing List 原始資料抓取、箱號/箱數清洗與 tempArray 打包邏輯。
+' ==============================================================================
 Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
                             ByVal ContentStartRow As Long, ByVal lastRow As Long)
     Const HEADER_ROW As Long = {max(rule.header_row, 1)}
@@ -1528,9 +2106,10 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             If Len(Cno) > 0 Then lastCno = Cno
             UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("qty", "quantity", "數量")))
             Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit qty", "uqty", "qty ctn", "q'ty ctn", "qty/ctn", "數量")))
+            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = NumberToText(Val(UQty) / Val(CTN))
             If Len(Qty) = 0 Then Qty = UQty
             If Len(UQty) = 0 Then UQty = Qty
-            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "EACH")
+            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "CTN")
             NW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("net weight", "n.w", "nw", "淨重")), CTN, NW_CALC_MODE)
             GW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("gross weight", "g.w", "gw", "毛重")), CTN, GW_CALC_MODE)
             MS = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("measurement", "measure", "cbm", "volume", "材積")))
@@ -1583,3 +2162,867 @@ def _vba_array_strings(values: list[str]) -> str:
 
 def _vba_array_numbers(values: list[int]) -> str:
     return "Array(" + ", ".join(str(int(value)) for value in values) + ")"
+
+
+def _strict_col(rule: SheetTransformRule | None, *keywords: str) -> int:
+    if rule is None:
+        return 0
+
+    normalized_keywords = [keyword.casefold() for keyword in keywords]
+    for mapping in rule.mappings:
+        haystack = f"{mapping.target} {mapping.source_header}".casefold()
+        if any(keyword in haystack for keyword in normalized_keywords):
+            return int(mapping.source_index or 0)
+    return 0
+
+
+def generate_op_temp_array_vba(
+    rules: list[SheetTransformRule],
+    lookup_mode: str = "header",
+    menu_items: list[str] | None = None,
+) -> str:
+    inv_rule = _find_rule(rules, "TINV")
+    pkg_rule = _find_rule(rules, "TPKG")
+    multi_box_mode = bool(pkg_rule.multi_box_mode) if pkg_rule else False
+
+    inv_header_row = max(inv_rule.header_row, 1) if inv_rule else 1
+    inv_data_start = max(inv_rule.data_start_row, 1) if inv_rule else 2
+    pkg_header_row = max(pkg_rule.header_row, 1) if pkg_rule else 1
+    pkg_data_start = max(pkg_rule.data_start_row, 1) if pkg_rule else 2
+    fixed_title = inv_rule.fixed_title if inv_rule else ""
+
+    inv_po_col = _strict_col(inv_rule, "po")
+    inv_item_col = _strict_col(inv_rule, "item")
+    inv_line_col = _strict_col(inv_rule, "line")
+    inv_desc_col = _strict_col(inv_rule, "description", "desc")
+    inv_qty_col = _strict_col(inv_rule, "quantity", "qty")
+    inv_unit_col = _strict_col(inv_rule, "unit", "uom")
+    inv_price_col = _strict_col(inv_rule, "unit price", "price", "upce")
+    inv_amount_col = _strict_col(inv_rule, "amount")
+    inv_brand_col = _strict_col(inv_rule, "brand")
+    inv_customer_item_col = _strict_col(inv_rule, "customer")
+
+    pkg_cust_po_col = _strict_col(pkg_rule, "customer po", "cust po")
+    pkg_po_col = _strict_col(pkg_rule, "po")
+    pkg_carton_col = _strict_col(pkg_rule, "carton no", "marks", "case no")
+    pkg_ctn_col = _strict_col(pkg_rule, "ctn", "carton", "package")
+    pkg_item_col = _strict_col(pkg_rule, "item")
+    pkg_desc_col = _strict_col(pkg_rule, "description", "desc")
+    pkg_qty_col = _strict_col(pkg_rule, "quantity", "qty")
+    pkg_unit_qty_col = _strict_col(pkg_rule, "unit qty", "qty/ctn", "q'ty")
+    pkg_unit_col = _strict_col(pkg_rule, "unit", "uom")
+    pkg_nw_col = _strict_col(pkg_rule, "net", "n.w", "nw")
+    pkg_gw_col = _strict_col(pkg_rule, "gross", "g.w", "gw")
+    pkg_ms_col = _strict_col(pkg_rule, "measurement", "cbm", "measure")
+
+    return f'''
+' ==============================================================================
+' 【出貨報單自動化處理系統】
+' 說明：本程式用於自動提取 Invoice (發票) 與 Packing List (包裝單) 的資料，
+'       並將兩者進行自動配對與排版，最終輸出成固定格式的報表。
+' 注意：非程式人員若需修改，請僅調整中文註解說明，切勿更動英文變數與邏輯符號。
+' ==============================================================================
+
+Private Info As Variant
+Private INVcollection As Collection
+Private PKGcollection As Collection
+Private target As Collection
+Private map As Collection
+Private Dst As Worksheet, Tst As Worksheet, Lst As Worksheet
+Private Inv As Worksheet, Pkg As Worksheet, InvPkg As Worksheet
+Private WB As Workbook
+Private Const ENABLE_MULTI_BOX_DETAIL As Boolean = {_vba_boolean(multi_box_mode)}
+
+' ==============================================================================
+' 1. 主程式開關 (Main)
+' 負責檢查資料是否準備好，並決定要先執行哪個步驟
+' ==============================================================================
+Sub Main()
+    Set WB = ActiveWorkbook
+    Set Inv = WB.Sheets("Inv")
+    Set Pkg = WB.Sheets("Pkg")
+
+    If WorksheetFunction.CountA(Inv.UsedRange) <> 0 Then
+        Call TINV(Inv, ActiveWorkbook.Sheets("Tinv"))
+    Else
+        MsgBox "無法提取資料，請確認檔案已匯入", vbExclamation
+        End
+    End If
+
+    If WorksheetFunction.CountA(Pkg.UsedRange) <> 0 Then
+        Call TPKG(Pkg, ActiveWorkbook.Sheets("Tpkg"), ActiveWorkbook.Sheets("Tinv"))
+        Call InvNo回寫
+    End If
+End Sub
+
+' ==============================================================================
+' 2. Invoice (發票) 主處理流程
+' 負責找出發票資料在哪裡，收集起來，然後寫入到新的表單
+' ==============================================================================
+Private Sub TINV(Dst As Worksheet, Tst As Worksheet)
+    Dim headerRow As Long, ContentStartRow As Long, lastRow As Long, newRow As Long, chkCounter As Long
+    Dim tempCollection As Collection
+    Dim foundHeader As Range
+
+    Set tempCollection = New Collection
+    Set foundHeader = Dst.Cells.Find(What:="*DESC*", LookIn:=xlValues, LookAt:=xlWhole)
+    If foundHeader Is Nothing Then
+        headerRow = {inv_header_row}
+    Else
+        headerRow = foundHeader.Row
+    End If
+    ContentStartRow = headerRow + 1
+    If ContentStartRow < {inv_data_start} Then ContentStartRow = {inv_data_start}
+
+    lastRow = LastUsedRow(Dst)
+    CollectDataTinv Dst, tempCollection, ContentStartRow, lastRow
+
+    newRow = 2
+    WriteHeaders Tst, "Tinv"
+    WriteDataTinv Tst, Dst, tempCollection, newRow, chkCounter, lastRow
+    SetColumnAWidth Tst, "Tinv"
+End Sub
+
+' ==============================================================================
+' 3. Invoice 資料收集器
+' 在原始表格中一行一行尋找，把品名、數量、單價、金額等資訊抓出來
+' ==============================================================================
+Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
+                            ByVal ContentStartRow As Long, ByVal lastRow As Long)
+    Const FIXED_TITLE As String = {_vba_string(fixed_title)}
+    Const colPO As Long = {inv_po_col}
+    Const colPno As Long = {inv_item_col}
+    Const colLine As Long = {inv_line_col}
+    Const colDSC As Long = {inv_desc_col}
+    Const colQty As Long = {inv_qty_col}
+    Const colUnit As Long = {inv_unit_col}
+    Const colUPCE As Long = {inv_price_col}
+    Const colAmt As Long = {inv_amount_col}
+    Const colBrand As Long = {inv_brand_col}
+    Const colCusItem As Long = {inv_customer_item_col}
+
+    Dim i As Long, j As Long
+    Dim tempArray As Variant
+    Dim QtyArray As Variant
+    Dim DscArray As Variant
+    Dim PO As Variant
+    Dim Title As String, PoNo As String, Itemno As String
+    Dim rawPO As String, rawLine As String, rawPARTNO As String, rawDSC As String
+    Dim QtyValue As String, rawUPCE As String, rawAmt As String
+    Dim unit As String, Upce As String, Amt As String
+    Dim HS As String, BRAND As String, CusItemNo As String
+
+    Title = CleanCellText(FIXED_TITLE)
+
+    For i = ContentStartRow To lastRow
+        If Len(Title) = 0 Then
+            If Len(CellTextAt(Dst, i, colDSC)) > 0 And Len(CellTextAt(Dst, i, colQty)) = 0 Then
+                If IsValidCombination(CellTextAt(Dst, i, colDSC), "^[A-Z ]+$") Then
+                    Title = CellTextAt(Dst, i, colDSC)
+                    For j = i To lastRow
+                        If LCase$(CellTextAt(Dst, j, 1)) Like "p.o*" Then
+                            PoNo = CellTextAt(Dst, j, 1)
+                            Exit For
+                        End If
+                    Next j
+                End If
+            End If
+        End If
+
+        If Len(CellTextAt(Dst, i, colQty)) > 0 And _
+           Len(CellTextAt(Dst, i, colDSC)) > 0 And _
+           IsValidCombination(CellTextAt(Dst, i, colQty), "^\\d+(\\.\\d+)?$") Then
+
+            rawPO = CellTextAt(Dst, i, colPO)
+            rawLine = CellTextAt(Dst, i, colLine)
+            rawPARTNO = CellTextAt(Dst, i, colPno)
+            rawDSC = CellTextAt(Dst, i, colDSC)
+            Itemno = rawPARTNO
+            If Len(PoNo) = 0 Then PoNo = rawPO
+
+            DscArray = Array(PrefixValue("PO# ", rawPO), PrefixValue("LINE# ", rawLine), rawPARTNO, rawDSC)
+            PO = Array(Title, PoNo, False)
+
+            QtyValue = KeepRegex(CellTextAt(Dst, i, colQty), "[0-9.A-Z]+")
+            unit = DefaultText(CellTextAt(Dst, i, colUnit), "EACH")
+            rawUPCE = CellTextAt(Dst, i, colUPCE)
+            rawAmt = CellTextAt(Dst, i, colAmt)
+
+            If rawUPCE Like "*US$*" Or rawUPCE Like "*$*" Or rawUPCE Like "*USD*" Then unit = "PCS"
+            QtyArray = Array(QtyValue, unit)
+
+            If rawUPCE = "US$" Or rawUPCE = "$" Or rawUPCE = "USD" Then
+                Upce = CellTextAt(Dst, i, colUPCE + 1)
+            Else
+                Upce = KeepRegex(rawUPCE, "[0-9.]+")
+            End If
+
+            If rawAmt = "US$" Or rawAmt = "$" Or rawAmt = "USD" Then
+                Amt = CellTextAt(Dst, i, colAmt + 1)
+            Else
+                Amt = KeepRegex(rawAmt, "[0-9.]+")
+            End If
+
+            BRAND = CellTextAt(Dst, i, colBrand)
+            CusItemNo = DefaultText(CellTextAt(Dst, i, colCusItem), Itemno)
+            tempArray = Array(i, Itemno, PO, QtyArray, Upce, Amt, DscArray, Title, HS, BRAND, CusItemNo)
+            tempCollection.Add tempArray
+        End If
+    Next i
+
+    Set INVcollection = tempCollection
+End Sub
+
+' ==============================================================================
+' 4. Invoice 資料寫入器
+' ==============================================================================
+Private Sub WriteDataTinv(ByRef Tst As Worksheet, ByRef Dst As Worksheet, _
+                          ByRef tempCollection As Collection, _
+                          ByRef newRow As Long, ByVal chkCounter As String, ByVal lastRow As Long)
+    Dim i As Long, k As Long
+    Dim ThisItem As Variant
+    Dim LastTitle As String, LastPO As String
+    Dim CurrentTitle As String, CurrentPO As String
+    Dim descLines As Variant
+    Dim thisPO As String
+    Dim lb As Long, ub As Long
+
+    chkCounter = 1
+    For i = 1 To tempCollection.Count
+        ThisItem = tempCollection(i)
+        CurrentTitle = CleanCellText(GetSafeValue(ThisItem, 7))
+        CurrentPO = CleanCellText(GetInnerValue(ThisItem, 2, 1))
+
+        With Tst
+            If CurrentTitle <> LastTitle And CurrentTitle <> "" Then
+                .Cells(newRow, 1).Value = CurrentTitle
+                .Cells(newRow, 1).Font.Underline = xlUnderlineStyleSingle
+                newRow = newRow + 1
+                LastTitle = CurrentTitle
+            End If
+
+            If CurrentPO <> LastPO And CurrentPO <> "" Then
+                .Cells(newRow, 1).Value = CurrentPO
+                newRow = newRow + 1
+                LastPO = CurrentPO
+            End If
+
+            descLines = GetSafeValue(ThisItem, 6)
+            If IsArray(descLines) Then
+                lb = LBound(descLines)
+                ub = UBound(descLines)
+                If ub >= lb Then
+                    thisPO = Trim$(CStr(descLines(lb)))
+                    If thisPO <> LastPO And thisPO <> "PO#" And thisPO <> "" Then
+                        .Cells(newRow, 1).Value = thisPO
+                        .Cells(newRow, 1).Font.Underline = xlUnderlineStyleSingle
+                        newRow = newRow + 1
+                        LastPO = thisPO
+                    End If
+                End If
+                If ub >= lb + 1 Then
+                    If Trim$(CStr(descLines(lb + 1))) <> "" And Trim$(CStr(descLines(lb + 1))) <> "LINE#" Then
+                        .Cells(newRow, 1).Value = Replace(Trim$(CStr(descLines(lb + 1))), ".000", "")
+                        newRow = newRow + 1
+                    End If
+                End If
+                If ub >= lb + 2 Then .Cells(newRow, 1).Value = Trim$(CStr(descLines(lb + 2)))
+            Else
+                .Cells(newRow, 1).Value = GetSafeValue(ThisItem, 1)
+            End If
+
+            .Cells(newRow, 2).Value = GetInnerValue(ThisItem, 3, 0)
+            .Cells(newRow, 3).Value = GetInnerValue(ThisItem, 3, 1)
+            .Cells(newRow, 4).Value = GetSafeValue(ThisItem, 4)
+            .Cells(newRow, 5).Value = GetSafeValue(ThisItem, 5)
+            .Cells(newRow, 5).NumberFormat = "0.00"
+            .Cells(newRow, 6).Value = GetSafeValue(ThisItem, 8)
+            .Cells(newRow, 7).Value = GetSafeValue(ThisItem, 9)
+            .Cells(newRow, 8).Value = chkCounter
+            .Cells(newRow, 9).Value = BuildCheckText(ThisItem)
+            .Cells(newRow, 10).Value = GetSafeValue(ThisItem, 1)
+            newRow = newRow + 1
+
+            If IsArray(descLines) Then
+                If ub >= lb + 3 Then
+                    For k = lb + 3 To ub
+                        If Len(Trim$(CStr(descLines(k)))) > 0 Then
+                            .Cells(newRow, 1).Value = Trim$(CStr(descLines(k)))
+                            newRow = newRow + 1
+                        End If
+                    Next k
+                End If
+            End If
+        End With
+        chkCounter = chkCounter + 1
+    Next i
+End Sub
+
+' ==============================================================================
+' 5. Packing List (包裝單) 主處理流程
+' ==============================================================================
+Private Sub TPKG(Dst As Worksheet, Tst As Worksheet, Lst As Worksheet)
+    Dim headerRow As Long, ContentStartRow As Long, lastRow As Long, newRow As Long, chkCounter As Long
+    Dim tempCollection As Collection
+    Dim foundHeader As Range
+
+    Set tempCollection = New Collection
+    Set foundHeader = Dst.Cells.Find(What:="*DESC*", LookIn:=xlValues, LookAt:=xlWhole)
+    If foundHeader Is Nothing Then
+        headerRow = {pkg_header_row}
+    Else
+        headerRow = foundHeader.Row
+    End If
+    ContentStartRow = headerRow + 1
+    If ContentStartRow < {pkg_data_start} Then ContentStartRow = {pkg_data_start}
+    lastRow = LastUsedRow(Dst)
+
+    CollectDataTpkg Dst, tempCollection, ContentStartRow, lastRow
+    newRow = 2
+    WriteHeaders Tst, "Tpkg"
+    WriteDataTpkg Tst, Dst, Lst, tempCollection, newRow, chkCounter, lastRow
+    SetColumnAWidth Tst, "Tpkg"
+    Call SayErrorCount(Tst, "Tpkg")
+End Sub
+
+' ==============================================================================
+' 6. Packing List 資料收集器
+' ==============================================================================
+Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
+                            ByVal ContentStartRow As Long, ByVal lastRow As Long)
+    Const colCNO As Long = {pkg_qty_col}
+    Const colCTN As Long = {pkg_ctn_col}
+    Const colPO As Long = {pkg_cust_po_col}
+    Const colcode As Long = {pkg_po_col}
+    Const colPno As Long = {pkg_item_col}
+    Const colDSC As Long = {pkg_desc_col}
+    Const colQty As Long = {pkg_qty_col}
+    Const colUQty As Long = {pkg_unit_qty_col}
+    Const colUnit As Long = {pkg_unit_col}
+    Const colNW As Long = {pkg_nw_col}
+    Const colGW As Long = {pkg_gw_col}
+    Const colMS As Long = {pkg_ms_col}
+    Const colCartonNo As Long = {pkg_carton_col}
+
+    Dim i As Long
+    Dim tempArray As Variant
+    Dim DscArray As Variant
+    Dim QtyArray As Variant
+    Dim PO As Variant
+    Dim Itemno As String, cno As String, CTN As String
+    Dim rawCUST As String, rawPONO As String, rawPARTNO As String, rawDSC As String
+    Dim Qty As String, UQty As String, unit As String, NW As String, GW As String, MS As String
+
+    For i = ContentStartRow To lastRow
+        If Len(CellTextAt(Dst, i, colQty)) > 0 And _
+           Len(CellTextAt(Dst, i, colDSC)) > 0 And _
+           IsValidCombination(CellTextAt(Dst, i, colQty), "\\d+") Then
+
+            rawCUST = CellTextAt(Dst, i, colPO)
+            rawPONO = CellTextAt(Dst, i, colcode)
+            rawPARTNO = CellTextAt(Dst, i, colPno)
+            rawDSC = CellTextAt(Dst, i, colDSC)
+            Itemno = rawPARTNO
+
+            CTN = KeepRegex(CellTextAt(Dst, i, colCTN), "[0-9.]+")
+            cno = CellTextAt(Dst, i, colCartonNo)
+            If Len(cno) = 0 Then cno = "1-" & NormalizeRangeNotation(CTN)
+            cno = NormalizeRangeNotation(cno)
+            If Val(CTN) <= 0 Then CTN = CStr(CartonCountFromRange(cno))
+            If Val(CTN) <= 0 Then CTN = "1"
+            PO = Array("", False, cno, Val(CTN))
+
+            DscArray = Array(PrefixValue("CUST P/O# ", rawCUST), PrefixValue("TTI PO NO. ", rawPONO), PrefixValue("CUST PART NO. ", rawPARTNO), rawDSC)
+            UQty = KeepRegex(CellTextAt(Dst, i, colQty), "\\d+(\\.\\d+)?")
+            Qty = KeepRegex(CellTextAt(Dst, i, colUQty), "\\d+(\\.\\d+)?")
+            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = NumberToText(Val(UQty) / Val(CTN))
+            If Len(Qty) = 0 Then Qty = UQty
+            unit = ConvertToSingularUnit(DefaultText(CellTextAt(Dst, i, colUnit), "CTN"))
+            NW = KeepRegex(CellTextAt(Dst, i, colNW), "\\d+(\\.\\d+)?")
+            GW = KeepRegex(CellTextAt(Dst, i, colGW), "\\d+(\\.\\d+)?")
+            MS = KeepRegex(CellTextAt(Dst, i, colMS), "\\d+(\\.\\d+)?")
+
+            QtyArray = Array(UQty, Qty, unit)
+            If Not IsEmpty(Qty) Then
+                tempArray = Array(i, Itemno, PO, QtyArray, NW, GW, DscArray, MS)
+                tempCollection.Add tempArray
+            End If
+        End If
+    Next i
+
+    Set PKGcollection = tempCollection
+End Sub
+
+' ==============================================================================
+' 7. Packing List 資料寫入與「發票自動配對」器
+' ==============================================================================
+Private Sub WriteDataTpkg(ByRef Tst As Worksheet, ByRef Dst As Worksheet, ByRef Lst As Worksheet, _
+                          ByRef tempCollection As Collection, _
+                          ByRef newRow As Long, ByVal ctnNo As String, ByVal lastRow As Long)
+    Dim i As Long, j As Long, k As Long
+    Dim pkgItem As Variant, INVItem As Variant, LastPkgItem As Variant
+    Dim matchedINVIndex As Long
+    Dim MatchResult As Collection
+    Dim PKGUsedItem As Collection, INVUsedItem As Collection, INVUsedQty As Collection
+    Dim Write_CNO As String, Write_CTN As Double, Write_DSC As Variant
+    Dim Write_QTY As Double, Write_UQTY As Double, Write_UNIT As String
+    Dim Write_UNW As Double, Write_UGW As Double, Write_NW As Double, Write_GW As Double
+    Dim Write_MS As Double, Write_CHK As String, Write_NotFound As Boolean
+
+    Set PKGUsedItem = New Collection
+    Set INVUsedItem = New Collection
+    Set INVUsedQty = New Collection
+    Set MatchResult = New Collection
+
+    Tst.Columns(1).NumberFormat = "@"
+    Tst.Columns(10).NumberFormat = "@"
+
+    For i = 1 To PKGcollection.Count
+        pkgItem = PKGcollection(i)
+        For j = 1 To INVcollection.Count
+            INVItem = INVcollection(j)
+            If Not InCollection(PKGUsedItem, CStr(pkgItem(0))) And _
+               Not InCollection(INVUsedItem, CStr(INVItem(0))) Then
+                If CleanCellText(pkgItem(1)) = CleanCellText(INVItem(1)) Then
+                    MatchResult.Add j, CStr(i)
+                    PKGUsedItem.Add CStr(pkgItem(0)), CStr(pkgItem(0))
+                    INVUsedItem.Add CStr(INVItem(0)), CStr(INVItem(0))
+                    Exit For
+                End If
+            End If
+        Next j
+    Next i
+
+    For i = 1 To PKGcollection.Count
+        pkgItem = PKGcollection(i)
+        On Error Resume Next
+        matchedINVIndex = MatchResult(CStr(i))
+        If Err.Number <> 0 Then matchedINVIndex = 0
+        Err.Clear
+        On Error GoTo 0
+
+        If matchedINVIndex > 0 Then
+            INVItem = INVcollection(matchedINVIndex)
+            Write_DSC = INVItem(6)
+            Write_UNIT = GetInnerValue(INVItem, 3, 1)
+            Write_CHK = BuildCheckText(INVItem)
+            Write_NotFound = False
+        Else
+            Write_DSC = pkgItem(6)
+            Write_UNIT = GetInnerValue(pkgItem, 3, 2)
+            Write_CHK = BuildCheckText(pkgItem)
+            Write_NotFound = True
+        End If
+
+        Write_CNO = NormalizeRangeNotation(CStr(GetInnerValue(pkgItem, 2, 2)))
+        Write_CTN = Val(GetInnerValue(pkgItem, 2, 3))
+        If Write_CTN <= 0 Then Write_CTN = 1
+        Write_UQTY = Val(GetInnerValue(pkgItem, 3, 0))
+        Write_QTY = Val(GetInnerValue(pkgItem, 3, 1))
+        If Write_QTY <= 0 Then Write_QTY = Write_UQTY
+        Write_UNW = Val(GetSafeValue(pkgItem, 4))
+        Write_UGW = Val(GetSafeValue(pkgItem, 5))
+        Write_NW = Round(Write_UNW * Write_CTN, 2)
+        Write_GW = Round(Write_UGW * Write_CTN, 2)
+        Write_MS = Val(GetSafeValue(pkgItem, 7))
+
+        With Tst
+            If i = 1 Then
+                .Cells(newRow, 1).Value = SafeExcelText(Write_CNO)
+                .Cells(newRow, 2).Value = Write_CTN
+                LastPkgItem = pkgItem
+            Else
+                If Write_CNO = CStr(GetInnerValue(LastPkgItem, 2, 3)) Then
+                    .Cells(newRow, 1).Value = SafeExcelText("#" & Write_CNO)
+                Else
+                    .Cells(newRow, 1).Value = SafeExcelText(Write_CNO)
+                    .Cells(newRow, 2).Value = Write_CTN
+                End If
+                LastPkgItem = pkgItem
+            End If
+
+            .Cells(newRow, 4).Value = Write_QTY
+            .Cells(newRow, 5).Value = Write_UNIT
+            If Write_UNW <> 0 Then .Cells(newRow, 6).Value = Write_NW
+            If Write_UGW <> 0 Then .Cells(newRow, 7).Value = Write_GW
+            If Write_MS <> 0 Then .Cells(newRow, 8).Value = Write_MS
+            .Cells(newRow, 10).Value = Write_CHK
+
+            If Write_NotFound Then
+                .Cells(newRow, 9).Value = "找不到"
+                .Cells(newRow, 9).Interior.Color = vbYellow
+            End If
+
+            If ENABLE_MULTI_BOX_DETAIL And Write_CTN > 1 Then
+                .Cells(newRow, 4).Value = "@" & Format(Write_QTY, "0")
+                .Cells(newRow, 6).Value = "@" & Format(Write_UNW, "0.00")
+                .Cells(newRow, 7).Value = "@" & Format(Write_UGW, "0.00")
+                .Cells(newRow + 1, 4).Value = Format(Write_UQTY, "0")
+                .Cells(newRow + 1, 5).Value = Write_UNIT
+                .Cells(newRow + 1, 6).Value = Format(Write_NW, "0.00")
+                .Cells(newRow + 1, 7).Value = Format(Write_GW, "0.00")
+            End If
+
+            For k = LBound(Write_DSC) To UBound(Write_DSC)
+                If Write_DSC(k) <> "" Then .Cells(newRow, 3).Value = Trim$(CStr(Write_DSC(k))): newRow = newRow + 1
+            Next k
+        End With
+    Next i
+
+    Tst.Columns("D:H").HorizontalAlignment = xlRight
+End Sub
+
+' ==============================================================================
+' 8. 輔助系統：把 Invoice 的序號填回 Packing 表單中
+' ==============================================================================
+Private Sub InvNo回寫()
+    Dim colCHKL As Long, colCHKT As Long, invNoL As Long, invNoT As Long
+    Dim lstLastRow As Long, tstLastRow As Long
+    Dim i As Long, j As Long, chkValue As String
+    Dim Tst As Worksheet, Lst As Worksheet
+    Dim dict As Object
+
+    Set Tst = ActiveWorkbook.Sheets("Tpkg")
+    Set Lst = ActiveWorkbook.Sheets("Tinv")
+    colCHKL = Lst.Columns.Find("CHK").Column
+    colCHKT = Tst.Columns.Find("CHK").Column
+    invNoL = Lst.Columns.Find("NO.").Column
+    invNoT = Tst.Columns.Find("Inv NO").Column
+    lstLastRow = Lst.Cells(Lst.Rows.Count, colCHKL).End(xlUp).Row
+    tstLastRow = Tst.Cells(Tst.Rows.Count, colCHKT).End(xlUp).Row
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    For j = 2 To lstLastRow
+        If Not dict.Exists(Lst.Cells(j, colCHKL).Value) Then
+            dict.Add Lst.Cells(j, colCHKL).Value, Lst.Cells(j, invNoL).Value
+        End If
+    Next j
+
+    For i = 2 To tstLastRow
+        chkValue = Tst.Cells(i, colCHKT).Value
+        If dict.Exists(chkValue) Then
+            Tst.Cells(i, invNoT).Value = dict(chkValue)
+        ElseIf chkValue Like "尾箱*" Then
+            Tst.Cells(i, invNoT).Value = "尾箱"
+        Else
+            Tst.Cells(i, invNoT).Value = "找不到"
+        End If
+    Next i
+End Sub
+
+' ==============================================================================
+' 9. 輔助系統：統計錯誤並跳出警告視窗
+' ==============================================================================
+Private Sub SayErrorCount(ws As Worksheet, tt As String)
+    Dim rng As Range
+    Dim cell As Range
+    Dim yellowCount As Long
+
+    Set rng = ws.UsedRange
+    yellowCount = 0
+    For Each cell In rng
+        If cell.Interior.Color = vbYellow Then yellowCount = yellowCount + 1
+    Next cell
+    If yellowCount > 0 Then MsgBox tt & " 共有 " & yellowCount & " 個識別困難，請確認輸出內容的正確性。", vbExclamation, "統計結果"
+End Sub
+
+' ==============================================================================
+' ==============================================================================
+' 以下皆為系統「底層運算工具」，負責處理陣列安全與數量加減。
+' 一般使用者請勿更動以下區域，避免系統崩潰。
+' ==============================================================================
+' ==============================================================================
+Private Sub WriteHeaders(ws As Worksheet, tt As String)
+    ws.Cells.Clear
+    If LCase$(tt) = "tinv" Then
+        ws.Range("A1:J1").Value = Array("DSC", "QTY", "UNIT", "UPCE", "AMT", "HS.", "BRAND", "NO.", "CHK", "ITEM NO")
+    Else
+        ws.Range("A1:K1").Value = Array("Ctn NO", "Ctn", "Description", "Qty", "Unit", "N.W.", "G.W.", "Measurement", "Inv NO", "CHK", "BRAND")
+        ws.Columns(1).NumberFormat = "@"
+        ws.Columns(10).NumberFormat = "@"
+    End If
+    ws.Rows(1).Font.Bold = True
+End Sub
+
+Private Sub SetColumnAWidth(ws As Worksheet, tt As String)
+    ws.Columns.AutoFit
+End Sub
+
+Function GetSafeValue(arr As Variant, idx As Long) As Variant
+    On Error Resume Next
+    GetSafeValue = arr(idx)
+    On Error GoTo 0
+End Function
+
+Function GetInnerValue(arr As Variant, outerIdx As Long, innerIdx As Long) As Variant
+    Dim v As Variant
+    v = GetSafeValue(arr, outerIdx)
+    If IsArray(v) Then
+        On Error Resume Next
+        GetInnerValue = v(innerIdx)
+        On Error GoTo 0
+    Else
+        GetInnerValue = v
+    End If
+End Function
+
+Function JoinPO(existingPO As String, newPO As String) As String
+    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+    Dim arr As Variant, p As Variant
+    If Trim$(existingPO) <> "" Then
+        arr = Split(existingPO, ",")
+        For Each p In arr
+            dict(Trim$(p)) = 1
+        Next p
+    End If
+    If Trim$(newPO) <> "" Then
+        arr = Split(newPO, ",")
+        For Each p In arr
+            dict(Trim$(p)) = 1
+        Next p
+    End If
+    JoinPO = Join(dict.Keys, ",")
+End Function
+
+Private Function GetUsedQty(ByRef UsedQtyCollection As Collection, ByVal key As String) As Double
+    On Error Resume Next
+    GetUsedQty = UsedQtyCollection(key)
+    If Err.Number <> 0 Then GetUsedQty = 0
+    On Error GoTo 0
+End Function
+
+Private Sub UpdateUsedQty(ByRef UsedQtyCollection As Collection, ByVal key As String, ByVal addQty As Double)
+    Dim currentQty As Double
+    On Error Resume Next
+    currentQty = UsedQtyCollection(key)
+    If Err.Number <> 0 Then currentQty = 0
+    UsedQtyCollection.Remove key
+    On Error GoTo 0
+    UsedQtyCollection.Add currentQty + addQty, key
+End Sub
+
+Private Function HasEnoughQty(ByRef UsedQtyCollection As Collection, ByVal key As String, _
+                              ByVal totalQty As Double, ByVal needQty As Double) As Boolean
+    Dim usedQty As Double
+    usedQty = GetUsedQty(UsedQtyCollection, key)
+    HasEnoughQty = (totalQty - usedQty) >= needQty
+End Function
+
+Private Function IsFullyUsed(ByRef UsedQtyCollection As Collection, ByVal key As String, _
+                             ByVal totalQty As Double) As Boolean
+    IsFullyUsed = GetUsedQty(UsedQtyCollection, key) >= totalQty
+End Function
+
+Private Function InCollection(ByRef items As Collection, ByVal key As String) As Boolean
+    Dim value As Variant
+    On Error Resume Next
+    value = items(key)
+    InCollection = (Err.Number = 0)
+    Err.Clear
+    On Error GoTo 0
+End Function
+
+Private Function CellTextAt(ws As Worksheet, rowNo As Long, colNo As Long) As String
+    If colNo <= 0 Then
+        CellTextAt = vbNullString
+    Else
+        CellTextAt = CleanCellText(GetMergedValue(ws.Cells(rowNo, colNo)))
+    End If
+End Function
+
+Private Function GetMergedValue(cell As Range) As String
+    If cell.MergeCells Then
+        GetMergedValue = CStr(cell.MergeArea.Cells(1, 1).Text)
+    Else
+        GetMergedValue = CStr(cell.Text)
+    End If
+End Function
+
+Private Function CleanCellText(ByVal value As Variant) As String
+    Dim text As String
+    text = CStr(value)
+    text = Replace(text, Chr(13), " ")
+    text = Replace(text, Chr(10), " ")
+    text = Replace(text, Chr(9), " ")
+    CleanCellText = Application.WorksheetFunction.Trim(text)
+End Function
+
+Private Function CleanCell(ByVal cell As Range) As String
+    CleanCell = CleanCellText(cell.Text)
+End Function
+
+Private Function IsValidCombination(ByVal value As Variant, ByVal pattern As String) As Boolean
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Pattern = pattern
+    re.IgnoreCase = True
+    IsValidCombination = re.Test(CleanCellText(value))
+End Function
+
+Private Function KeepRegex(ByVal value As Variant, ByVal pattern As String) As String
+    Dim re As Object
+    Dim matches As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Pattern = pattern
+    re.Global = False
+    re.IgnoreCase = True
+    Set matches = re.Execute(CleanCellText(value))
+    If matches.Count > 0 Then KeepRegex = matches(0).Value
+End Function
+
+Private Function PrefixValue(ByVal prefixText As String, ByVal value As String) As String
+    value = CleanCellText(value)
+    If Len(value) = 0 Then
+        PrefixValue = vbNullString
+    Else
+        PrefixValue = prefixText & value
+    End If
+End Function
+
+Private Function DefaultText(ByVal value As String, ByVal fallback As String) As String
+    value = CleanCellText(value)
+    If Len(value) = 0 Then
+        DefaultText = fallback
+    Else
+        DefaultText = value
+    End If
+End Function
+
+Private Function ConvertToSingularUnit(ByVal value As String) As String
+    value = UCase$(CleanCellText(value))
+    If Len(value) = 0 Then value = "CTN"
+    If Right$(value, 1) = "S" Then value = Left$(value, Len(value) - 1)
+    ConvertToSingularUnit = value
+End Function
+
+Private Function NumberToText(ByVal value As Double) As String
+    NumberToText = Trim$(Str$(Round(value, 4)))
+End Function
+
+Private Function NormalizeRangeNotation(ByVal value As String) As String
+    Dim text As String
+    text = NormalizeDateLikeCartonText(value)
+    text = Replace(text, " ", "")
+    text = Replace(text, "~", "-")
+    If Len(text) = 0 Then text = "1"
+    NormalizeRangeNotation = text
+End Function
+
+Private Function NormalizeDateLikeCartonText(ByVal value As String) As String
+    Dim text As String, parts As Variant, dayParts As Variant
+    Dim monthPart As String, dayPart As String, monthNo As Long
+    text = Replace(CleanCellText(value), " ", "")
+    If InStr(1, text, "月", vbTextCompare) > 0 And InStr(1, text, "日", vbTextCompare) > 0 Then
+        parts = Split(text, "月")
+        If UBound(parts) >= 1 Then
+            monthPart = KeepRegex(parts(0), "\\d+")
+            dayParts = Split(CStr(parts(1)), "日")
+            dayPart = KeepRegex(dayParts(0), "\\d+")
+            If Val(monthPart) > 0 And Val(dayPart) > 0 Then
+                NormalizeDateLikeCartonText = NumberToText(Val(monthPart)) & "-" & NumberToText(Val(dayPart))
+                Exit Function
+            End If
+        End If
+    End If
+    If InStr(1, text, "-", vbTextCompare) > 0 Then
+        parts = Split(text, "-")
+        monthNo = MonthNameToNumber(CStr(parts(0)))
+        If monthNo > 0 And UBound(parts) >= 1 Then
+            dayPart = KeepRegex(parts(1), "\\d+")
+            If Val(dayPart) > 0 Then
+                NormalizeDateLikeCartonText = NumberToText(monthNo) & "-" & NumberToText(Val(dayPart))
+                Exit Function
+            End If
+        End If
+    End If
+    NormalizeDateLikeCartonText = text
+End Function
+
+Private Function MonthNameToNumber(ByVal value As String) As Long
+    value = LCase$(Left$(CleanCellText(value), 3))
+    Select Case value
+        Case "jan": MonthNameToNumber = 1
+        Case "feb": MonthNameToNumber = 2
+        Case "mar": MonthNameToNumber = 3
+        Case "apr": MonthNameToNumber = 4
+        Case "may": MonthNameToNumber = 5
+        Case "jun": MonthNameToNumber = 6
+        Case "jul": MonthNameToNumber = 7
+        Case "aug": MonthNameToNumber = 8
+        Case "sep": MonthNameToNumber = 9
+        Case "oct": MonthNameToNumber = 10
+        Case "nov": MonthNameToNumber = 11
+        Case "dec": MonthNameToNumber = 12
+    End Select
+End Function
+
+Private Function CartonCountFromRange(ByVal cartonText As String) As Double
+    Dim parts As Variant
+    cartonText = NormalizeRangeNotation(cartonText)
+    If InStr(1, cartonText, "-", vbTextCompare) = 0 Then
+        CartonCountFromRange = Val(cartonText)
+    Else
+        parts = Split(cartonText, "-")
+        If UBound(parts) >= 1 Then CartonCountFromRange = Val(parts(1)) - Val(parts(0)) + 1
+    End If
+End Function
+
+Private Function SafeExcelText(ByVal value As Variant) As String
+    Dim text As String
+    text = CleanCellText(value)
+    If Len(text) = 0 Then
+        SafeExcelText = vbNullString
+    ElseIf Left$(text, 1) = "'" Then
+        SafeExcelText = text
+    Else
+        SafeExcelText = "'" & text
+    End If
+End Function
+
+Private Function BuildCheckText(ByVal item As Variant) As String
+    Dim text As String
+    If IsArray(GetSafeValue(item, 2)) Then text = Join(GetSafeValue(item, 2), " ")
+    If IsArray(GetSafeValue(item, 6)) Then text = text & " " & Join(GetSafeValue(item, 6), " ")
+    text = text & " " & CStr(GetInnerValue(item, 3, 0))
+    BuildCheckText = Application.WorksheetFunction.Trim(text)
+End Function
+
+' ==============================================================================
+' 輔助系統：自動跨分頁尋找 VGM 與 CBM 總數
+' ==============================================================================
+Public Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
+    Dim ws As Worksheet
+    Dim fVGM As Range, fCBM As Range
+    Dim i As Long, textValue As String
+
+    actualVGM = 0
+    actualCBM = 0
+    For Each ws In ActiveWorkbook.Worksheets
+        Set fVGM = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fVGM Is Nothing Then
+            If fVGM.Column > 1 Then
+                textValue = KeepRegex(fVGM.Offset(0, -1).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+            If actualVGM <= 0 And fVGM.Column < ws.Columns.Count Then
+                textValue = KeepRegex(fVGM.Offset(0, 1).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+            If actualVGM <= 0 Then actualVGM = Val(KeepRegex(fVGM.Value, "[0-9.]+"))
+        End If
+
+        Set fCBM = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fCBM Is Nothing Then
+            For i = 1 To 10
+                textValue = KeepRegex(fCBM.Offset(0, i).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then
+                    actualCBM = Val(textValue)
+                    Exit For
+                End If
+            Next i
+        End If
+
+        If actualVGM > 0 And actualCBM > 0 Then Exit For
+    Next ws
+End Sub
+'''

@@ -24,6 +24,7 @@ class SheetTransformRule:
     fixed_title: str = ""
     nw_mode: str = "source_is_unit"
     gw_mode: str = "source_is_unit"
+    multi_box_mode: bool = False
 
 
 def generate_vba(
@@ -366,30 +367,37 @@ def generate_op_temp_array_vba(
 ) -> str:
     inv_rule = _find_rule(rules, "TINV")
     pkg_rule = _find_rule(rules, "TPKG")
+    multi_box_mode = bool(pkg_rule.multi_box_mode) if pkg_rule else False
     procedures: list[str] = []
     calls: list[str] = []
 
     if inv_rule:
         procedures.append(_generate_tinv_temp_array_procedure(inv_rule, lookup_mode))
         calls.append(
-            f'''    If SheetExists({_vba_string(inv_rule.source_sheet_name)}) Then
-        Set Inv = WB.Worksheets({_vba_string(inv_rule.source_sheet_name)})
+            f'''    Set Inv = ResolveSourceSheet(Array({_vba_string(inv_rule.source_sheet_name)}, "Inv+Pkg", "Inv", "Invoice", "INVOICE"))
+    If Not Inv Is Nothing Then
         If WorksheetFunction.CountA(Inv.UsedRange) <> 0 Then
             Call TINV(Inv, GetOrCreateSheet({_vba_string(inv_rule.output_sheet_name)}))
         Else
             MsgBox "無法提取 TINV 資料，請確認 " & {_vba_string(inv_rule.source_sheet_name)} & " 已匯入", vbExclamation
         End If
+    Else
+        MsgBox "找不到 TINV 來源工作表，請確認是否有 " & {_vba_string(inv_rule.source_sheet_name)} & " 或 Inv+Pkg。", vbExclamation
     End If'''
         )
 
     if pkg_rule:
         procedures.append(_generate_tpkg_temp_array_procedure(pkg_rule, lookup_mode))
         calls.append(
-            f'''    If SheetExists({_vba_string(pkg_rule.source_sheet_name)}) Then
-        Set Pkg = WB.Worksheets({_vba_string(pkg_rule.source_sheet_name)})
+            f'''    Set Pkg = ResolveSourceSheet(Array({_vba_string(pkg_rule.source_sheet_name)}, "Inv+Pkg", "Pkg", "Packing", "PACKING"))
+    If Not Pkg Is Nothing Then
         If WorksheetFunction.CountA(Pkg.UsedRange) <> 0 Then
             Call TPKG(Pkg, GetOrCreateSheet({_vba_string(pkg_rule.output_sheet_name)}), GetOrCreateSheet("Tinv"))
+        Else
+            MsgBox "無法提取 TPKG 資料，請確認 " & {_vba_string(pkg_rule.source_sheet_name)} & " 已匯入", vbExclamation
         End If
+    Else
+        MsgBox "找不到 TPKG 來源工作表，請確認是否有 " & {_vba_string(pkg_rule.source_sheet_name)} & " 或 Inv+Pkg。", vbExclamation
     End If'''
         )
 
@@ -420,6 +428,8 @@ Private WB As Workbook
 Private Inv As Worksheet
 Private Pkg As Worksheet
 
+Private Const ENABLE_MULTI_BOX_DETAIL As Boolean = {_vba_boolean(multi_box_mode)}
+
 Public Sub Main()
     Set WB = ThisWorkbook
 {chr(10).join(calls)}
@@ -444,6 +454,364 @@ End Sub
 ' ==============================================================================
 ' 【檢查工具】把 Collection 展開成工作表，方便不熟 VBA 的人確認抓值結果。
 ' ==============================================================================
+
+Private Sub WriteDataTinv(ByVal ws As Worksheet, ByVal items As Collection)
+    Dim item As Variant
+    Dim poInfo As Variant
+    Dim qtyInfo As Variant
+    Dim dscInfo As Variant
+    Dim currentTitle As String
+    Dim currentPo As String
+    Dim titleText As String
+    Dim poText As String
+    Dim lineText As String
+    Dim r As Long
+    Dim seq As Long
+    Dim k As Long
+    Dim lb As Long
+    Dim ub As Long
+
+    ws.Cells.Clear
+    ws.Range("A1:K1").Value = Array("DSC", "QTY", "UNIT", "UPCE", "AMT", "HS.", "BRAND", "NO.", "CHK", "ITEM NO", "Text1")
+
+    r = 2
+    seq = 1
+    If items Is Nothing Then GoTo FinishTinv
+
+    For Each item In items
+        poInfo = GetSafeArrayValue(item, 2)
+        qtyInfo = GetSafeArrayValue(item, 3)
+        dscInfo = GetSafeArrayValue(item, 6)
+
+        titleText = CleanCellText(GetSafeArrayValue(item, 7))
+        If Len(titleText) = 0 Then titleText = CleanCellText(GetSafeArrayValue(poInfo, 0))
+        If Len(titleText) > 0 And titleText <> currentTitle Then
+            ws.Cells(r, 1).Value = "^" & titleText & "^"
+            currentTitle = titleText
+            r = r + 1
+        End If
+
+        poText = CleanCellText(GetSafeArrayValue(poInfo, 1))
+        If Len(poText) > 0 And poText <> currentPo Then
+            ws.Cells(r, 1).Value = "^PO# " & poText & "^"
+            currentPo = poText
+            r = r + 1
+        End If
+
+        lineText = CleanCellText(GetSafeArrayValue(dscInfo, 1))
+        If Len(lineText) > 0 Then
+            ws.Cells(r, 1).Value = lineText
+            r = r + 1
+        End If
+
+        ws.Cells(r, 1).Value = ValueToDisplayText(GetSafeArrayValue(item, 1))
+        ws.Cells(r, 2).Value = ValueToDisplayText(GetSafeArrayValue(qtyInfo, 0))
+        ws.Cells(r, 3).Value = DefaultText(ValueToDisplayText(GetSafeArrayValue(qtyInfo, 1)), "EACH")
+        ws.Cells(r, 4).Value = ValueToDisplayText(GetSafeArrayValue(item, 4))
+        ws.Cells(r, 5).Value = ValueToDisplayText(GetSafeArrayValue(item, 5))
+        ws.Cells(r, 6).Value = ValueToDisplayText(GetSafeArrayValue(item, 8))
+        ws.Cells(r, 7).Value = ValueToDisplayText(GetSafeArrayValue(item, 9))
+        ws.Cells(r, 8).Value = CStr(seq)
+        ws.Cells(r, 9).Value = BuildJoinedCheckText(dscInfo, GetSafeArrayValue(qtyInfo, 0))
+        ws.Cells(r, 10).Value = DefaultText(ValueToDisplayText(GetSafeArrayValue(item, 10)), ValueToDisplayText(GetSafeArrayValue(item, 1)))
+        r = r + 1
+
+        If IsArray(dscInfo) Then
+            lb = LBound(dscInfo)
+            ub = UBound(dscInfo)
+            If ub >= lb + 3 Then
+                For k = lb + 3 To ub
+                    If Len(ValueToDisplayText(GetSafeArrayValue(dscInfo, k))) > 0 Then
+                        ws.Cells(r, 1).Value = ValueToDisplayText(GetSafeArrayValue(dscInfo, k))
+                        r = r + 1
+                    End If
+                Next k
+            End If
+        End If
+
+        seq = seq + 1
+    Next item
+
+FinishTinv:
+    ws.Rows(1).Font.Bold = True
+    ws.Columns.AutoFit
+End Sub
+
+Private Sub WriteDataTpkg(ByVal ws As Worksheet, ByVal items As Collection, ByVal tinvWs As Worksheet)
+    Dim i As Long
+    Dim k As Long
+    Dim r As Long
+    Dim item As Variant
+    Dim invItem As Variant
+    Dim pkgPoInfo As Variant
+    Dim pkgQtyInfo As Variant
+    Dim descInfo As Variant
+    Dim usedInv As Object
+    Dim matchedIndex As Long
+    Dim ctnText As String
+    Dim ctnCount As Double
+    Dim qtyPerCtn As Double
+    Dim totalQty As Double
+    Dim unitText As String
+    Dim nwUnit As Double
+    Dim gwUnit As Double
+    Dim totalNW As Double
+    Dim totalGW As Double
+    Dim totalOrgGW As Double
+    Dim actualVGM As Double
+    Dim actualCBM As Double
+    Dim ratioGW As Double
+    Dim titleText As String
+    Dim poText As String
+    Dim lineText As String
+    Dim currentTitle As String
+    Dim currentPo As String
+    Dim lb As Long
+    Dim ub As Long
+    Dim chkText As String
+
+    ws.Cells.Clear
+    ws.Range("A1:J1").Value = Array("Ctn NO", "Ctn", "Description", "Qty", "Unit", "N.W.", "G.W.", "Measurement", "Inv NO", "CHK")
+    ws.Columns(3).NumberFormat = "@"
+    ws.Columns(3).HorizontalAlignment = xlLeft
+
+    If items Is Nothing Then GoTo FinishTpkg
+    Set usedInv = CreateObject("Scripting.Dictionary")
+
+    For i = 1 To items.Count
+        item = items(i)
+        pkgPoInfo = GetSafeArrayValue(item, 2)
+        ctnCount = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgPoInfo, 3))))
+        If ctnCount <= 0 Then ctnCount = 1
+        gwUnit = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(item, 5))))
+        totalOrgGW = totalOrgGW + (gwUnit * ctnCount)
+    Next i
+
+    Call GetActualTotals(actualVGM, actualCBM)
+    If actualVGM > 0 And totalOrgGW > 0 Then
+        ratioGW = actualVGM / totalOrgGW
+    Else
+        ratioGW = 1
+    End If
+
+    r = 2
+    For i = 1 To items.Count
+        item = items(i)
+        matchedIndex = FindBestInvoiceIndex(item, usedInv)
+
+        If matchedIndex > 0 Then
+            invItem = INVcollection(matchedIndex)
+            usedInv(CStr(matchedIndex)) = True
+            descInfo = GetSafeArrayValue(invItem, 6)
+            unitText = DefaultText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(invItem, 3), 1)), "EACH")
+            titleText = CleanCellText(GetSafeArrayValue(GetSafeArrayValue(invItem, 2), 0))
+            chkText = BuildCheckTextForItem(invItem)
+        Else
+            descInfo = GetSafeArrayValue(item, 6)
+            unitText = DefaultText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(item, 3), 2)), "EACH")
+            titleText = CleanCellText(GetSafeArrayValue(GetSafeArrayValue(item, 2), 0))
+            chkText = BuildCheckTextForItem(item)
+        End If
+
+        If Len(titleText) = 0 Then titleText = "HAND TOOLS"
+        If titleText <> currentTitle Then
+            ws.Cells(r, 3).Value = "^" & Replace(titleText, "^", "") & "^"
+            currentTitle = titleText
+            r = r + 1
+        End If
+
+        If IsArray(descInfo) Then
+            lb = LBound(descInfo)
+            ub = UBound(descInfo)
+            poText = CleanCellText(GetSafeArrayValue(descInfo, lb))
+            If Len(poText) > 0 And poText <> currentPo Then
+                If InStr(poText, "^") = 0 Then poText = "^" & poText & "^"
+                ws.Cells(r, 3).Value = poText
+                currentPo = CleanCellText(GetSafeArrayValue(descInfo, lb))
+                r = r + 1
+            End If
+
+            If ub >= lb + 1 Then
+                lineText = Replace(CleanCellText(GetSafeArrayValue(descInfo, lb + 1)), ".000", "")
+                If Len(lineText) > 0 And lineText <> "LINE#" Then
+                    ws.Cells(r, 3).Value = lineText
+                    r = r + 1
+                End If
+            End If
+        End If
+
+        pkgPoInfo = GetSafeArrayValue(item, 2)
+        pkgQtyInfo = GetSafeArrayValue(item, 3)
+        ctnText = CleanCellText(GetSafeArrayValue(pkgPoInfo, 2))
+        ctnText = BuildCartonNo(ctnText, ctnText)
+        ctnCount = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgPoInfo, 3))))
+        If ctnCount <= 0 Then ctnCount = 1
+        totalQty = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgQtyInfo, 0))))
+        qtyPerCtn = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(pkgQtyInfo, 1))))
+        If totalQty <= 0 Then totalQty = qtyPerCtn
+        If qtyPerCtn <= 0 Then qtyPerCtn = totalQty
+        nwUnit = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(item, 4))))
+        gwUnit = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(item, 5))))
+        totalNW = Round(nwUnit * ctnCount, 2)
+        totalGW = Round(gwUnit * ctnCount * ratioGW, 2)
+
+        ws.Cells(r, 1).Value = ctnText
+        ws.Cells(r, 2).Value = ctnCount
+        If IsArray(descInfo) And UBound(descInfo) >= LBound(descInfo) + 2 Then
+            ws.Cells(r, 3).Value = CleanCellText(GetSafeArrayValue(descInfo, LBound(descInfo) + 2))
+        Else
+            ws.Cells(r, 3).Value = ValueToDisplayText(GetSafeArrayValue(item, 1))
+        End If
+        ws.Cells(r, 5).Value = unitText
+        ws.Cells(r, 10).Value = chkText
+
+        If matchedIndex > 0 Then
+            ws.Cells(r, 9).Value = matchedIndex
+        Else
+            ws.Cells(r, 9).Value = "找不到"
+            ws.Cells(r, 9).Interior.Color = vbYellow
+        End If
+
+        If ENABLE_MULTI_BOX_DETAIL And ctnCount > 1 Then
+            ws.Cells(r, 4).Value = "@" & NumberToText(qtyPerCtn)
+            ws.Cells(r, 6).Value = "@" & NumberToText(nwUnit)
+            ws.Cells(r, 7).Value = "@" & NumberToText(gwUnit)
+            r = r + 1
+            ws.Cells(r, 4).Value = totalQty
+            ws.Cells(r, 5).Value = unitText
+            ws.Cells(r, 6).Value = totalNW
+            ws.Cells(r, 7).Value = totalGW
+        Else
+            ws.Cells(r, 4).Value = totalQty
+            ws.Cells(r, 6).Value = totalNW
+            ws.Cells(r, 7).Value = totalGW
+        End If
+        r = r + 1
+
+        If IsArray(descInfo) Then
+            If ub >= lb + 3 Then
+                For k = lb + 3 To ub
+                    If Len(CleanCellText(GetSafeArrayValue(descInfo, k))) > 0 Then
+                        ws.Cells(r, 3).Value = CleanCellText(GetSafeArrayValue(descInfo, k))
+                        r = r + 1
+                    End If
+                Next k
+            End If
+        End If
+    Next i
+
+FinishTpkg:
+    ws.Rows(1).Font.Bold = True
+    ws.Columns(3).HorizontalAlignment = xlLeft
+    ws.Columns("D:H").HorizontalAlignment = xlRight
+    ws.Columns.AutoFit
+End Sub
+
+Private Function FindBestInvoiceIndex(ByVal pkgItem As Variant, ByVal usedInv As Object) As Long
+    Dim j As Long
+    Dim invItem As Variant
+    Dim pkgItemNo As String
+    Dim pkgPo As String
+    Dim pkgQty As Double
+    Dim invQty As Double
+
+    pkgItemNo = CleanCellText(GetSafeArrayValue(pkgItem, 1))
+    pkgPo = CleanCellText(GetSafeArrayValue(GetSafeArrayValue(pkgItem, 6), 0))
+    pkgPo = Replace(pkgPo, "CUST P/O# ", "")
+    pkgQty = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(pkgItem, 3), 0))))
+
+    For j = 1 To CollectionCount(INVcollection)
+        If Not usedInv.Exists(CStr(j)) Then
+            invItem = INVcollection(j)
+            invQty = Val(CleanNumberText(ValueToDisplayText(GetSafeArrayValue(GetSafeArrayValue(invItem, 3), 0))))
+            If CleanCellText(GetSafeArrayValue(invItem, 1)) = pkgItemNo And invQty = pkgQty Then
+                FindBestInvoiceIndex = j
+                Exit Function
+            End If
+        End If
+    Next j
+
+    For j = 1 To CollectionCount(INVcollection)
+        If Not usedInv.Exists(CStr(j)) Then
+            invItem = INVcollection(j)
+            If CleanCellText(GetSafeArrayValue(invItem, 1)) = pkgItemNo And _
+               CleanCellText(GetSafeArrayValue(GetSafeArrayValue(invItem, 2), 1)) = pkgPo Then
+                FindBestInvoiceIndex = j
+                Exit Function
+            End If
+        End If
+    Next j
+
+    For j = 1 To CollectionCount(INVcollection)
+        If Not usedInv.Exists(CStr(j)) Then
+            invItem = INVcollection(j)
+            If CleanCellText(GetSafeArrayValue(invItem, 1)) = pkgItemNo Then
+                FindBestInvoiceIndex = j
+                Exit Function
+            End If
+        End If
+    Next j
+
+    FindBestInvoiceIndex = 0
+End Function
+
+Private Function BuildCheckTextForItem(ByVal item As Variant) As String
+    BuildCheckTextForItem = BuildJoinedCheckText(GetSafeArrayValue(item, 6), GetSafeArrayValue(GetSafeArrayValue(item, 3), 0))
+End Function
+
+Private Function BuildJoinedCheckText(ByVal arr As Variant, ByVal tailValue As Variant) As String
+    Dim i As Long
+    Dim text As String
+    Dim part As String
+
+    If IsArray(arr) Then
+        For i = LBound(arr) To UBound(arr)
+            part = CleanCellText(GetSafeArrayValue(arr, i))
+            If Len(part) > 0 Then text = text & " " & part
+        Next i
+    End If
+
+    part = CleanCellText(tailValue)
+    If Len(part) > 0 Then text = text & " " & part
+    BuildJoinedCheckText = text
+End Function
+
+Private Function FindInvoiceNo(ByVal ws As Worksheet, ByVal itemNo As String) As String
+    Dim found As Range
+
+    itemNo = CleanCellText(itemNo)
+    If Len(itemNo) = 0 Then
+        FindInvoiceNo = "找不到"
+        Exit Function
+    End If
+
+    On Error Resume Next
+    Set found = ws.Columns(10).Find(What:=itemNo, LookIn:=xlValues, LookAt:=xlWhole)
+    On Error GoTo 0
+
+    If found Is Nothing Then
+        FindInvoiceNo = "找不到"
+    Else
+        FindInvoiceNo = CleanCellText(ws.Cells(found.Row, 8).Value)
+    End If
+End Function
+
+Private Function MultiplyNumberText(ByVal valueText As String, ByVal factorText As String) As String
+    Dim valueNumber As Double
+    Dim factorNumber As Double
+
+    valueText = CleanNumberText(valueText)
+    factorText = CleanNumberText(factorText)
+    If Len(valueText) = 0 Then
+        MultiplyNumberText = vbNullString
+        Exit Function
+    End If
+
+    valueNumber = Val(valueText)
+    factorNumber = Val(factorText)
+    If factorNumber <= 0 Then factorNumber = 1
+    MultiplyNumberText = NumberToText(valueNumber * factorNumber)
+End Function
 
 Private Sub WriteCollectionPreview(ByVal sheetName As String, ByVal items As Collection, ByVal headers As Variant)
     Dim ws As Worksheet
@@ -508,6 +876,21 @@ Private Function GetOrCreateSheet(ByVal sheetName As String) As Worksheet
     End If
 End Function
 
+Private Function ResolveSourceSheet(ByVal sheetNames As Variant) As Worksheet
+    Dim i As Long
+    Dim sheetName As String
+
+    For i = LBound(sheetNames) To UBound(sheetNames)
+        sheetName = CleanCellText(CStr(sheetNames(i)))
+        If Len(sheetName) > 0 Then
+            If SheetExists(sheetName) Then
+                Set ResolveSourceSheet = ThisWorkbook.Worksheets(sheetName)
+                Exit Function
+            End If
+        End If
+    Next i
+End Function
+
 Private Sub ResolveSourceColumns(ByVal ws As Worksheet, ByVal headerRow As Long, _
                                  ByVal useHeaderLookup As Boolean, ByVal sourceHeaders As Variant, _
                                  ByVal fallbackCols As Variant, ByRef sourceCols() As Long)
@@ -528,7 +911,7 @@ End Sub
 
 Private Function FirstMappedValue(ByVal ws As Worksheet, ByVal rowNumber As Long, _
                                   ByRef sourceCols() As Long, ByVal targetHeaders As Variant, _
-                                  ByVal keywords As Variant) As String
+                                  ByVal sourceHeaders As Variant, ByVal keywords As Variant) As String
     Dim i As Long
     Dim k As Long
     Dim headerKey As String
@@ -536,7 +919,7 @@ Private Function FirstMappedValue(ByVal ws As Worksheet, ByVal rowNumber As Long
 
     For i = LBound(targetHeaders) To UBound(targetHeaders)
         If sourceCols(i) > 0 Then
-            headerKey = NormalizeKey(CStr(targetHeaders(i)))
+            headerKey = NormalizeKey(CStr(targetHeaders(i)) & " " & CStr(sourceHeaders(i)))
             For k = LBound(keywords) To UBound(keywords)
                 keywordKey = NormalizeKey(CStr(keywords(k)))
                 If Len(keywordKey) > 0 Then
@@ -553,6 +936,25 @@ Private Function FirstMappedValue(ByVal ws As Worksheet, ByVal rowNumber As Long
     FirstMappedValue = vbNullString
 End Function
 
+Private Function MappedValueByTarget(ByVal ws As Worksheet, ByVal rowNumber As Long, _
+                                     ByRef sourceCols() As Long, ByVal targetHeaders As Variant, _
+                                     ByVal targetName As String) As String
+    Dim i As Long
+    Dim lookupKey As String
+
+    lookupKey = NormalizeKey(targetName)
+    For i = LBound(targetHeaders) To UBound(targetHeaders)
+        If sourceCols(i) > 0 Then
+            If NormalizeKey(CStr(targetHeaders(i))) = lookupKey Then
+                MappedValueByTarget = CleanCellText(ws.Cells(rowNumber, sourceCols(i)).Text)
+                Exit Function
+            End If
+        End If
+    Next i
+
+    MappedValueByTarget = vbNullString
+End Function
+
 Private Function PrefixValue(ByVal prefixText As String, ByVal value As String) As String
     value = CleanCellText(value)
     If Len(value) = 0 Then
@@ -561,6 +963,88 @@ Private Function PrefixValue(ByVal prefixText As String, ByVal value As String) 
         PrefixValue = prefixText & value
     End If
 End Function
+
+Private Function BuildCartonNo(ByVal ctnText As String, ByVal fallbackText As String) As String
+    Dim ctnValue As Double
+    Dim rawText As String
+
+    rawText = CleanCellText(ctnText)
+    If InStr(1, rawText, "-", vbTextCompare) > 0 Then
+        BuildCartonNo = rawText
+        Exit Function
+    End If
+
+    ctnText = CleanNumberText(rawText)
+    If Len(ctnText) = 0 Then
+        BuildCartonNo = fallbackText
+        Exit Function
+    End If
+
+    ctnValue = Val(ctnText)
+    If ctnValue <= 1 Then
+        BuildCartonNo = "1"
+    Else
+        BuildCartonNo = "1-" & ctnText
+    End If
+End Function
+
+Private Function CartonCountFromRange(ByVal cartonText As String) As Double
+    Dim parts As Variant
+    Dim firstNo As Double
+    Dim lastNo As Double
+    Dim cleanText As String
+
+    cleanText = Replace(CleanCellText(cartonText), " ", "")
+    If InStr(1, cleanText, "-", vbTextCompare) = 0 Then
+        CartonCountFromRange = Val(CleanNumberText(cleanText))
+        Exit Function
+    End If
+
+    parts = Split(cleanText, "-")
+    If UBound(parts) < 1 Then Exit Function
+
+    firstNo = Val(CleanNumberText(CStr(parts(0))))
+    lastNo = Val(CleanNumberText(CStr(parts(1))))
+    If firstNo > 0 And lastNo >= firstNo Then
+        CartonCountFromRange = lastNo - firstNo + 1
+    End If
+End Function
+
+Private Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
+    Dim ws As Worksheet
+    Dim found As Range
+    Dim i As Long
+    Dim textValue As String
+
+    actualVGM = 0
+    actualCBM = 0
+
+    For Each ws In ThisWorkbook.Worksheets
+        Set found = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not found Is Nothing Then
+            textValue = CleanNumberText(CStr(found.Offset(0, -1).Value))
+            If Len(textValue) > 0 And Val(textValue) > 0 Then
+                actualVGM = Val(textValue)
+            Else
+                textValue = CleanNumberText(CStr(found.Offset(0, 1).Value))
+                If Len(textValue) > 0 And Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+        End If
+
+        Set found = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not found Is Nothing Then
+            For i = 1 To 10
+                textValue = CleanNumberText(CStr(found.Offset(0, i).Value))
+                If Len(textValue) > 0 And Val(textValue) > 0 Then
+                    actualCBM = Val(textValue)
+                    Exit For
+                End If
+            Next i
+        End If
+
+        If actualVGM > 0 And actualCBM > 0 Then Exit For
+    Next ws
+End Sub
 
 Private Function CleanNumberText(ByVal value As String) As String
     Dim i As Long
@@ -833,6 +1317,7 @@ def _generate_tinv_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     Call CollectDataTinv(Dst, tempCollection, ContentStartRow, lastRow)
 
     Set INVcollection = tempCollection
+    Call WriteDataTinv(Tst, INVcollection)
 End Sub
 
 Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
@@ -862,8 +1347,13 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Dim CusItemNo As String
     Dim LineNo As String
     Dim Dsc As String
+    Dim Dsc2 As String
+    Dim Dsc3 As String
+    Dim Dsc4 As String
+    Dim Dsc5 As String
     Dim Qty As String
     Dim unit As String
+    Dim lastPoNo As String
 
     ' 【欄位對應區】
     ' targetHeaders：系統要抓的標準資料名稱
@@ -877,24 +1367,35 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
 
     For i = ContentStartRow To lastRow
         If RowHasMappedData(Dst, i, sourceCols) Then
-            Itemno = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("item", "item no", "part", "part no", "stock", "model", "料號", "品號"))
-            PoNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("po", "po no", "p/o", "order", "訂單"))
-            LineNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("line", "line no", "項次"))
-            Dsc = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("description", "desc", "goods", "commodity", "品名", "貨名"))
-            Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("qty", "quantity", "數量")))
-            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit", "uom", "單位")), "PCS")
-            Upce = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit price", "price", "upce", "單價")))
-            Amt = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("amount", "total", "金額", "總價")))
-            HS = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("hs", "hs code", "稅則", "稅號"))
-            BRAND = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("brand", "品牌"))
-            CusItemNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("customer item", "cust item", "cust part", "customer part", "客戶料號"))
-            Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("title", "category", "分類")))
+            Itemno = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("item", "item no", "part", "part no", "stock", "model", "料號", "品號"))
+            PoNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("po", "po no", "p/o", "order", "訂單"))
+            If Len(PoNo) = 0 Then
+                PoNo = lastPoNo
+            Else
+                lastPoNo = PoNo
+            End If
+            LineNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("line", "line no", "項次"))
+            Dsc = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description")
+            If Len(Dsc) = 0 Then Dsc = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("description", "desc", "goods", "commodity", "品名", "貨名"))
+            Dsc2 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 2")
+            Dsc3 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 3")
+            Dsc4 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 4")
+            Dsc5 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 5")
+            Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("qty", "quantity", "數量")))
+            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "EACH")
+            Upce = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit price", "price", "upce", "單價")))
+            Amt = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("amount", "total", "金額", "總價")))
+            HS = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("hs", "hs code", "稅則", "稅號"))
+            BRAND = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("brand", "品牌"))
+            CusItemNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("customer item", "cust item", "cust part", "customer part", "客戶料號"))
+            Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("title", "category", "分類")))
 
-            If Len(Itemno & Dsc & Qty & Upce & Amt) = 0 Then GoTo NextTinvRow
+            If Len(Itemno) = 0 And Len(Dsc) = 0 Then GoTo NextTinvRow
+            If Len(Qty) = 0 Then GoTo NextTinvRow
 
             Po = Array(Title, PoNo, False)
             QtyArray = Array(Qty, unit)
-            DscArray = Array(PrefixValue("PO# ", PoNo), PrefixValue("LINE# ", LineNo), Itemno, Dsc)
+            DscArray = Array(PrefixValue("PO# ", PoNo), PrefixValue("LINE# ", LineNo), Itemno, Dsc, Dsc2, Dsc3, Dsc4, Dsc5)
 
             ' 【重要】OP 後段程式依照這個順序取值，請勿任意調整順序。
             tempArray = Array(i, Itemno, Po, QtyArray, Upce, Amt, DscArray, Title, HS, BRAND, CusItemNo)
@@ -928,6 +1429,7 @@ def _generate_tpkg_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
     Call CollectDataTpkg(Dst, tempCollection, ContentStartRow, lastRow)
 
     Set PKGcollection = tempCollection
+    Call WriteDataTpkg(Tst, PKGcollection, Lst)
 End Sub
 
 Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
@@ -958,10 +1460,19 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Dim Cno As String
     Dim CTN As String
     Dim Dsc As String
+    Dim Dsc2 As String
+    Dim Dsc3 As String
+    Dim Dsc4 As String
+    Dim Dsc5 As String
     Dim UQty As String
     Dim Qty As String
     Dim unit As String
     Dim CustPo As String
+    Dim CartonFrom As String
+    Dim CartonTo As String
+    Dim lastCustPo As String
+    Dim lastPoNo As String
+    Dim lastCno As String
 
     ' 【欄位對應區】
     ' targetHeaders：系統要抓的標準資料名稱
@@ -975,25 +1486,63 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
 
     For i = ContentStartRow To lastRow
         If RowHasMappedData(Dst, i, sourceCols) Then
-            Itemno = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("item", "item no", "part", "part no", "stock", "model", "料號", "品號"))
-            CustPo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("cust po", "customer po", "po", "po no", "p/o", "訂單"))
-            PoNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("tti po", "po number", "po no", "po", "訂單"))
-            Dsc = FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("description", "desc", "goods", "commodity", "品名", "貨名"))
-            Cno = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("marks", "marks nos", "carton no", "ctn no", "case no", "箱號", "嘜頭")), "")
-            CTN = DefaultText(CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("ctn", "carton", "packages", "package", "箱數", "件數"))), "1")
-            UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit qty", "uqty", "quantity", "qty", "數量")))
-            Qty = DefaultText(CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("qty", "quantity", "數量"))), UQty)
-            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("unit", "uom", "單位")), "PCS")
-            NW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("net weight", "n.w", "nw", "淨重")), CTN, NW_CALC_MODE)
-            GW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("gross weight", "g.w", "gw", "毛重")), CTN, GW_CALC_MODE)
-            MS = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("measurement", "measure", "cbm", "volume", "材積")))
-            Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, Array("title", "category", "分類")))
+            Itemno = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("item", "item no", "part", "part no", "stock", "model", "料號", "品號"))
+            CustPo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("cust po", "customer po", "po", "po no", "p/o", "訂單"))
+            If Len(CustPo) = 0 Then
+                CustPo = lastCustPo
+            Else
+                lastCustPo = CustPo
+            End If
 
-            If Len(Itemno & Dsc & Qty & NW & GW & Cno) = 0 Then GoTo NextTpkgRow
+            PoNo = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("tti po", "po number", "po no", "po", "訂單"))
+            If Len(PoNo) = 0 Then
+                PoNo = lastPoNo
+            Else
+                lastPoNo = PoNo
+            End If
+            Dsc = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description")
+            If Len(Dsc) = 0 Then Dsc = FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("description", "desc", "goods", "commodity", "品名", "貨名"))
+            Dsc2 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 2")
+            Dsc3 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 3")
+            Dsc4 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 4")
+            Dsc5 = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Description 5")
+            Cno = MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Carton No")
+            If Len(Cno) = 0 Then Cno = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("marks", "marks nos", "carton no", "ctn no", "case no", "箱號", "嘜頭")), "")
+            CartonFrom = CleanNumberText(MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Carton From"))
+            CartonTo = CleanNumberText(MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "Carton To"))
+            CTN = CleanNumberText(MappedValueByTarget(Dst, i, sourceCols, targetHeaders, "CTN"))
+            If Len(CTN) = 0 Then CTN = DefaultText(CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("ctn", "carton", "packages", "package", "箱數", "件數"))), "")
+            If Len(Cno) = 0 And Len(CartonFrom) > 0 And Len(CartonTo) > 0 Then
+                Cno = CartonFrom & "-" & CartonTo
+                CTN = NumberToText(Val(CartonTo) - Val(CartonFrom) + 1)
+            End If
+            If Len(Cno) = 0 Then
+                If Len(CTN) > 0 Then
+                    Cno = BuildCartonNo(CTN, lastCno)
+                Else
+                    Cno = lastCno
+                End If
+            End If
+            If Val(CTN) <= 0 And Len(Cno) > 0 Then CTN = NumberToText(CartonCountFromRange(Cno))
+            If Val(CTN) <= 0 Then CTN = "1"
+            If Len(Cno) > 0 Then lastCno = Cno
+            UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("qty", "quantity", "數量")))
+            Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit qty", "uqty", "qty ctn", "q'ty ctn", "qty/ctn", "數量")))
+            If Len(Qty) = 0 Then Qty = UQty
+            If Len(UQty) = 0 Then UQty = Qty
+            unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "EACH")
+            NW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("net weight", "n.w", "nw", "淨重")), CTN, NW_CALC_MODE)
+            GW = AdjustWeightForTempArray(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("gross weight", "g.w", "gw", "毛重")), CTN, GW_CALC_MODE)
+            MS = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("measurement", "measure", "cbm", "volume", "材積")))
+            Title = DefaultText(FIXED_TITLE, FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("title", "category", "分類")))
+
+            If Len(Itemno) = 0 And Len(Dsc) = 0 Then GoTo NextTpkgRow
+            If Len(Qty) = 0 And Len(UQty) = 0 Then GoTo NextTpkgRow
+            If Len(Cno) = 0 And Len(CTN) = 0 Then GoTo NextTpkgRow
 
             Po = Array(Title, False, Cno, Val(CTN))
             QtyArray = Array(UQty, Qty, unit)
-            DscArray = Array(PrefixValue("CUST P/O# ", CustPo), PrefixValue("TTI PO NO. ", PoNo), PrefixValue("CUST PART NO. ", Itemno), Dsc)
+            DscArray = Array(PrefixValue("CUST P/O# ", CustPo), PrefixValue("TTI PO NO. ", PoNo), PrefixValue("CUST PART NO. ", Itemno), Dsc, Dsc2, Dsc3, Dsc4, Dsc5)
 
             ' 【重要】OP 後段程式依照這個順序取值，請勿任意調整順序。
             tempArray = Array(i, Itemno, Po, QtyArray, NW, GW, DscArray, MS)

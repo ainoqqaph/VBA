@@ -15,11 +15,14 @@ from invoice_packing_cleaner.extractors import (
 from invoice_packing_cleaner.profile_tools import dump_profile, load_profile
 from invoice_packing_cleaner.table_tools import (
     DEFAULT_TARGET_COLUMNS,
+    OP_TINV_COLUMNS,
+    OP_TPKG_COLUMNS,
     SourceColumn,
     build_source_options,
     find_default_source_index,
     prepare_structured_table,
     split_target_columns,
+    suggest_header_row,
 )
 from invoice_packing_cleaner.template_tools import (
     TemplateCandidate,
@@ -61,6 +64,43 @@ WEIGHT_MODE_LABELS = {
 }
 
 
+OP_TEMP_ARRAY_RUNTIME_RULES = {
+    "TINV": {
+        "header_row": 3,
+        "data_start_row": 4,
+        "mappings": [
+            ("PO No.", 1),
+            ("Item No.", 3),
+            ("Line No.", 4),
+            ("Description of Goods", 6),
+            ("Quantity", 7),
+            ("Unit", 0),
+            ("Unit Price", 8),
+            ("Amount", 9),
+            ("Brand", 2),
+            ("Customer Item", 3),
+        ],
+    },
+    "TPKG": {
+        "header_row": 3,
+        "data_start_row": 4,
+        "mappings": [
+            ("Customer PO", 1),
+            ("PO No.", 1),
+            ("Item No.", 3),
+            ("Description of Goods", 6),
+            ("Quantity", 7),
+            ("Unit Qty", 10),
+            ("Unit", 0),
+            ("CTN", 14),
+            ("Net Weight", 11),
+            ("Gross Weight", 12),
+            ("Measurement", 13),
+        ],
+    },
+}
+
+
 @dataclass(frozen=True)
 class OutputTemplateConfig:
     key: str
@@ -68,6 +108,18 @@ class OutputTemplateConfig:
     header_row: int
     data_start_row: int
     label: str
+
+
+def _target_columns_for_section(
+    key: str,
+    config: OutputTemplateConfig,
+    op_temp_array_mode: bool,
+) -> list[TemplateColumn]:
+    if not op_temp_array_mode:
+        return config.columns
+
+    names = OP_TINV_COLUMNS if key == "TINV" else OP_TPKG_COLUMNS
+    return [TemplateColumn(name, index) for index, name in enumerate(names, start=1)]
 
 
 def main() -> None:
@@ -177,6 +229,7 @@ def main() -> None:
                 config=config,
                 parsed_tables=parsed_tables,
                 imported_profile=imported_profile,
+                op_temp_array_mode=vba_output_mode.startswith("OP tempArray"),
             )
             if rule:
                 rules.append(rule)
@@ -188,7 +241,7 @@ def main() -> None:
 
     st.subheader("C. 產生 VBA 與客戶規則")
     if vba_output_mode.startswith("OP tempArray"):
-        vba_code = generate_op_temp_array_vba(rules, lookup_mode=lookup_mode)
+        vba_code = generate_op_temp_array_vba(rules, lookup_mode="position")
         vba_file_suffix = "OP_TempArrays"
     else:
         vba_code = generate_workbook_vba(rules, lookup_mode=lookup_mode)
@@ -448,9 +501,10 @@ def _target_template_section(imported_profile: dict[str, Any]) -> dict[str, Outp
     st.caption("上傳一份 OP 手打好的最終格式檔；如果裡面有 TINV 和 TPKG 工作表，下面可以分別選。")
 
     template_file = st.file_uploader(
-        "上傳 OP 最終格式範本（Excel / CSV，可選）",
-        type=["xlsx", "xls", "xlsm", "csv"],
+        "上傳 OP 最終格式範本（Excel / CSV / PDF，可選）",
+        type=["xlsx", "xls", "xlsm", "csv", "pdf"],
         key="output_template",
+        help="Excel / CSV / PDF",
     )
 
     candidates: list[TemplateCandidate] = []
@@ -540,6 +594,7 @@ def _section_workflow(
     config: OutputTemplateConfig,
     parsed_tables: list[ParsedTable],
     imported_profile: dict[str, Any],
+    op_temp_array_mode: bool = False,
 ) -> tuple[SheetTransformRule | None, dict[str, Any]]:
     defaults = DEFAULT_SECTIONS[key]
     sheet_profile = _sheet_profile(imported_profile, key)
@@ -548,12 +603,6 @@ def _section_workflow(
     st.markdown(f"### {defaults['label']}")
     st.caption(f"最終格式來源：{config.label}")
 
-    source_sheet_name = st.text_input(
-        "VBA 讀取的來源工作表名稱",
-        value=str(sheet_profile.get("source_sheet", defaults["source_sheet"])),
-        key=f"{key}_source_sheet_name",
-        help="未來在 Excel 裡，原始 invoice 建議放 Inv，packing list 建議放 Pkg。",
-    )
     output_sheet_name = st.text_input(
         "VBA 輸出的工作表名稱",
         value=str(sheet_profile.get("output_sheet", defaults["output_sheet"])),
@@ -568,6 +617,7 @@ def _section_workflow(
 
     nw_mode = _safe_weight_mode(sheet_profile.get("nw_mode", "source_is_unit"))
     gw_mode = _safe_weight_mode(sheet_profile.get("gw_mode", "source_is_unit"))
+    multi_box_mode = bool(sheet_profile.get("multi_box_mode", False))
 
     if key == "TPKG":
         st.markdown("#### NW / GW 重量推算")
@@ -590,6 +640,12 @@ def _section_workflow(
                 format_func=lambda mode: WEIGHT_MODE_LABELS[mode],
                 key=f"{key}_gw_mode",
             )
+        multi_box_mode = st.checkbox(
+            "啟用多箱處理",
+            value=multi_box_mode,
+            key=f"{key}_multi_box_mode",
+            help="有些客戶需要把每箱與總數量/重量分列顯示；不需要時請關閉。",
+        )
 
     selected_table = _select_source_table_for_section(key, parsed_tables)
     raw_df = selected_table.dataframe
@@ -599,16 +655,32 @@ def _section_workflow(
         st.error("這個來源沒有資料可預覽。")
         return None, {}
 
+    default_source_sheet_name = str(
+        sheet_profile.get("source_sheet")
+        or selected_table.source_sheet_name
+        or defaults["source_sheet"]
+    )
+    source_sheet_name = st.text_input(
+        "VBA 讀取的來源工作表名稱",
+        value=default_source_sheet_name,
+        key=f"{key}_source_sheet_name_{_safe_file_stem(default_source_sheet_name)[:40]}",
+        disabled=selected_table.kind != "excel",
+        help="會自動帶入目前選到的 Excel 來源分頁；貼回轉檔工具時，原始資料分頁名稱要和這裡一致。",
+    )
+
     st.dataframe(raw_df.head(45), use_container_width=True)
 
     max_rows = max(len(raw_df), 1)
+    auto_header_row = suggest_header_row(raw_df)
+    auto_data_start_row = min(max_rows, auto_header_row + 1)
+    st.caption(f"系統預估表頭在第 {auto_header_row} 列，資料從第 {auto_data_start_row} 列開始；如果預覽不對，再手動調整。")
     setup_cols = st.columns(4)
     with setup_cols[0]:
         header_row = st.number_input(
             "來源表頭列",
             min_value=1,
             max_value=max_rows,
-            value=_bounded_int(sheet_profile.get("header_row", 1), 1, max_rows),
+            value=_bounded_int(sheet_profile.get("header_row", auto_header_row), 1, max_rows),
             step=1,
             key=f"{key}_header_row",
         )
@@ -617,7 +689,7 @@ def _section_workflow(
             "來源資料開始列",
             min_value=1,
             max_value=max_rows,
-            value=_bounded_int(sheet_profile.get("data_start_row", 2), 1, max_rows),
+            value=_bounded_int(sheet_profile.get("data_start_row", auto_data_start_row), 1, max_rows),
             step=1,
             key=f"{key}_data_start_row",
         )
@@ -646,9 +718,12 @@ def _section_workflow(
         st.dataframe(structured_df.head(30), use_container_width=True)
 
     st.markdown("欄位對應")
+    target_columns = _target_columns_for_section(key, config, op_temp_array_mode)
+    if op_temp_array_mode:
+        st.info("OP tempArray 模式會使用內部 TINV / TPKG 標準欄位做對應，產出的 VBA 仍會寫回 Tinv / Tpkg 固定格式。")
     mappings = _mapping_editor(
         section_key=key,
-        target_columns=config.columns,
+        target_columns=target_columns,
         source_options=source_options,
         saved_mappings=saved_mappings,
     )
@@ -665,6 +740,7 @@ def _section_workflow(
         fixed_title=fixed_title.strip(),
         nw_mode=nw_mode,
         gw_mode=gw_mode,
+        multi_box_mode=multi_box_mode,
     )
     profile = {
         "source_sheet": rule.source_sheet_name,
@@ -676,6 +752,7 @@ def _section_workflow(
         "fixed_title": rule.fixed_title,
         "nw_mode": rule.nw_mode,
         "gw_mode": rule.gw_mode,
+        "multi_box_mode": rule.multi_box_mode,
         "mappings": [
             {
                 "target": mapping.target,
@@ -687,6 +764,56 @@ def _section_workflow(
         ],
     }
     return rule, profile
+
+
+def _op_temp_array_runtime_rule(key: str, rule: SheetTransformRule) -> SheetTransformRule:
+    runtime = OP_TEMP_ARRAY_RUNTIME_RULES.get(key)
+    if not runtime:
+        return rule
+
+    mappings = [
+        FieldMapping(target=target, source_header="", source_index=source_index)
+        for target, source_index in runtime["mappings"]
+    ]
+
+    return SheetTransformRule(
+        procedure_name=rule.procedure_name,
+        source_sheet_name=str(DEFAULT_SECTIONS[key]["source_sheet"]),
+        output_sheet_name=rule.output_sheet_name,
+        mappings=mappings,
+        header_row=int(runtime["header_row"]),
+        data_start_row=int(runtime["data_start_row"]),
+        output_header_row=rule.output_header_row,
+        output_data_start_row=rule.output_data_start_row,
+        fixed_title=rule.fixed_title,
+        nw_mode=rule.nw_mode,
+        gw_mode=rule.gw_mode,
+        multi_box_mode=rule.multi_box_mode,
+    )
+
+
+def _profile_from_rule(rule: SheetTransformRule) -> dict[str, Any]:
+    return {
+        "source_sheet": rule.source_sheet_name,
+        "output_sheet": rule.output_sheet_name,
+        "header_row": rule.header_row,
+        "data_start_row": rule.data_start_row,
+        "output_header_row": rule.output_header_row,
+        "output_data_start_row": rule.output_data_start_row,
+        "fixed_title": rule.fixed_title,
+        "nw_mode": rule.nw_mode,
+        "gw_mode": rule.gw_mode,
+        "multi_box_mode": rule.multi_box_mode,
+        "mappings": [
+            {
+                "target": mapping.target,
+                "target_col": mapping.target_col,
+                "source_header": mapping.source_header,
+                "source_index": mapping.source_index,
+            }
+            for mapping in rule.mappings
+        ],
+    }
 
 
 def _parse_uploaded_files(uploaded_files) -> list[ParsedTable]:
@@ -709,7 +836,7 @@ def _parse_uploaded_files(uploaded_files) -> list[ParsedTable]:
 
 def _select_source_table_for_section(key: str, parsed_tables: list[ParsedTable]) -> ParsedTable:
     labels = [table.label for table in parsed_tables]
-    default_index = _default_source_table_index(key, labels)
+    default_index = _default_source_table_index(key, parsed_tables)
     selected_label = st.selectbox(
         f"選擇 {key} 的客戶原始來源",
         labels,
@@ -761,22 +888,98 @@ def _mapping_editor(
 
 
 def _default_candidate_index(key: str, candidates: list[TemplateCandidate]) -> int:
-    key_lower = key.lower()
-    for index, candidate in enumerate(candidates, start=1):
+    preferred = {
+        "TINV": ["tinv", "invoice", "inv"],
+        "TPKG": ["tpkg", "packing", "pack", "pkg"],
+    }.get(key, [key.lower()])
+
+    def score_candidate(candidate: TemplateCandidate) -> int:
         sheet = candidate.sheet_name.lower()
         label = candidate.label.lower()
-        if key_lower in sheet or key_lower in label:
-            return index
-    return 1 if candidates else 0
+        columns = " ".join(column.name.lower() for column in candidate.columns)
+        score = 0
+
+        for rank, needle in enumerate(preferred):
+            weight = len(preferred) - rank
+            if needle in sheet:
+                score += 100 * weight
+            if needle in label:
+                score += 40 * weight
+            if needle in columns:
+                score += 12 * weight
+
+        if key == "TPKG":
+            if any(word in columns for word in ["packing no", "ctn", "carton", "gross weight", "net weight", "measurement"]):
+                score += 80
+            if "invoice" in sheet and "packing" not in sheet:
+                score -= 200
+
+        if key == "TINV":
+            if "unit price" in columns and "amount" in columns:
+                score += 100
+            elif any(word in columns for word in ["unit price", "amount", "marks"]):
+                score += 40
+            if any(word in columns for word in ["packing no", "net weight", "gross weight", "measurement"]):
+                score -= 120
+            if "packing" in sheet and "invoice" not in sheet:
+                score -= 200
+
+        score += candidate.score
+        return score
+
+    best_index = 0
+    best_score = -10**9
+    for index, candidate in enumerate(candidates, start=1):
+        score = score_candidate(candidate)
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    return best_index if candidates else 0
 
 
-def _default_source_table_index(key: str, labels: list[str]) -> int:
-    needles = ["inv", "invoice"] if key == "TINV" else ["pkg", "packing", "pack"]
-    for index, label in enumerate(labels):
-        lower = label.lower()
-        if any(needle in lower for needle in needles):
-            return index
-    return 0
+def _default_source_table_index(key: str, parsed_tables: list[ParsedTable]) -> int:
+    preferred = (
+        ["invoice", "inv", "unit price", "amount"]
+        if key == "TINV"
+        else ["packing", "pack", "pkg", "roll/no", "net weight", "gross weight", "ctn"]
+    )
+    penalties = (
+        ["packing", "net weight", "gross weight"]
+        if key == "TINV"
+        else ["invoice", "unit price", "amount"]
+    )
+
+    best_index = 0
+    best_score = -10**9
+    for index, table in enumerate(parsed_tables):
+        preview_values = []
+        if not table.dataframe.empty:
+            preview_values = table.dataframe.head(25).astype(str).values.ravel().tolist()
+        haystack = " ".join([table.label, *preview_values]).lower()
+        sheet_key = (
+            table.source_sheet_name.lower()
+            .replace("+", "")
+            .replace(" ", "")
+            .replace("_", "")
+            .replace("-", "")
+        )
+        score = 0
+        if sheet_key in {"invpkg", "invandpkg", "invpacking", "invoicepacking"}:
+            score += 500
+        if sheet_key in {"tinv", "tpkg", "menu", "hs"}:
+            score -= 500
+        for rank, needle in enumerate(preferred):
+            if needle in haystack:
+                score += (len(preferred) - rank) * 20
+        for needle in penalties:
+            if needle in haystack:
+                score -= 30
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    return best_index
 
 
 def _default_source_option_index(

@@ -14,6 +14,7 @@ class ParsedTable:
     kind: str
     dataframe: pd.DataFrame
     note: str = ""
+    source_sheet_name: str = ""
 
 
 class UnsupportedFileType(ValueError):
@@ -36,11 +37,9 @@ def parse_uploaded_file(file_name: str, data: bytes) -> list[ParsedTable]:
     if suffix == ".docx":
         return _parse_docx(file_name, data)
     if suffix == ".doc":
-        raise UnsupportedFileType(
-            "舊版 .doc 需要先另存成 .docx，或用 Word/LibreOffice 轉檔後再上傳。"
-        )
+        raise UnsupportedFileType("目前不直接讀取 .doc，請先另存成 .docx 或 PDF。")
 
-    raise UnsupportedFileType(f"目前不支援 {suffix or '未知'} 檔案格式。")
+    raise UnsupportedFileType(f"不支援的檔案格式：{suffix or '無副檔名'}")
 
 
 def _normalize_cell(value: object) -> str:
@@ -78,6 +77,7 @@ def _parse_excel(file_name: str, data: bytes) -> list[ParsedTable]:
                 file_name=file_name,
                 kind="excel",
                 dataframe=_normalize_dataframe(df),
+                source_sheet_name=sheet_name,
             )
         )
 
@@ -101,7 +101,8 @@ def _parse_csv(file_name: str, data: bytes) -> list[ParsedTable]:
                     file_name=file_name,
                     kind="csv",
                     dataframe=_normalize_dataframe(df),
-                    note=f"使用 {encoding} 編碼讀取。",
+                    note=f"已使用 {encoding} 編碼讀取。",
+                    source_sheet_name="CSV",
                 )
             ]
         except Exception as exc:  # pragma: no cover - depends on input encoding
@@ -114,7 +115,7 @@ def _parse_pdf(file_name: str, data: bytes) -> list[ParsedTable]:
     try:
         import pdfplumber
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-        raise MissingDependency("請先安裝 pdfplumber：pip install pdfplumber") from exc
+        raise MissingDependency("請先安裝 pdfplumber。") from exc
 
     tables: list[ParsedTable] = []
 
@@ -127,10 +128,11 @@ def _parse_pdf(file_name: str, data: bytes) -> list[ParsedTable]:
                     if rows:
                         tables.append(
                             ParsedTable(
-                                label=f"{file_name} / PDF 第 {page_number} 頁 表格 {table_number}",
+                                label=f"{file_name} / PDF page {page_number} table {table_number}",
                                 file_name=file_name,
                                 kind="pdf-table",
                                 dataframe=_normalize_dataframe(pd.DataFrame(rows)),
+                                source_sheet_name=f"PDF page {page_number} table {table_number}",
                             )
                         )
                 continue
@@ -140,13 +142,17 @@ def _parse_pdf(file_name: str, data: bytes) -> list[ParsedTable]:
             if lines:
                 tables.append(
                     ParsedTable(
-                        label=f"{file_name} / PDF 第 {page_number} 頁 文字",
+                        label=f"{file_name} / PDF page {page_number} text",
                         file_name=file_name,
                         kind="pdf-text",
                         dataframe=_normalize_dataframe(pd.DataFrame(lines)),
-                        note="這頁沒有偵測到表格，已用逐行文字方式讀取。",
+                        note="PDF 沒有表格線，已先用文字行讀取；若欄位不準，請改用 OCR 或手動欄位對應。",
+                        source_sheet_name=f"PDF page {page_number} text",
                     )
                 )
+
+    if not tables:
+        tables.extend(_parse_pdf_with_ocr(file_name, data))
 
     if not tables:
         tables.append(
@@ -155,18 +161,62 @@ def _parse_pdf(file_name: str, data: bytes) -> list[ParsedTable]:
                 file_name=file_name,
                 kind="pdf-empty",
                 dataframe=pd.DataFrame(),
-                note="沒有讀到可用文字或表格；若是掃描圖檔 PDF，之後需要加 OCR。",
+                note="沒有讀到可用表格或文字；如果這是掃描 PDF，請確認 OCR 套件 rapidocr、onnxruntime、pypdfium2 已安裝。",
+                source_sheet_name="PDF",
             )
         )
 
     return tables
 
 
+def _parse_pdf_with_ocr(file_name: str, data: bytes) -> list[ParsedTable]:
+    try:
+        from invoice_packing_cleaner.ocr_tools import ocr_pdf_to_dataframes
+    except Exception as exc:  # pragma: no cover - optional OCR stack
+        return [
+            ParsedTable(
+                label=f"{file_name} / PDF OCR",
+                file_name=file_name,
+                kind="pdf-ocr-missing",
+                dataframe=pd.DataFrame(),
+                note=f"掃描 PDF 需要 OCR 套件才能讀取：{exc}",
+                source_sheet_name="PDF OCR",
+            )
+        ]
+
+    try:
+        ocr_tables = ocr_pdf_to_dataframes(file_name, data)
+    except Exception as exc:  # pragma: no cover - OCR runtime depends on input
+        return [
+            ParsedTable(
+                label=f"{file_name} / PDF OCR",
+                file_name=file_name,
+                kind="pdf-ocr-error",
+                dataframe=pd.DataFrame(),
+                note=f"OCR 讀取掃描 PDF 失敗：{exc}",
+                source_sheet_name="PDF OCR",
+            )
+        ]
+
+    return [
+        ParsedTable(
+            label=f"{file_name} / {sheet_name}",
+            file_name=file_name,
+            kind="pdf-ocr",
+            dataframe=_normalize_dataframe(df),
+            note="這頁是掃描 PDF，系統已使用 OCR 轉成可選欄位；請檢查辨識文字是否有少字或誤字。",
+            source_sheet_name=sheet_name,
+        )
+        for sheet_name, df in ocr_tables
+        if not df.empty
+    ]
+
+
 def _parse_docx(file_name: str, data: bytes) -> list[ParsedTable]:
     try:
         from docx import Document
     except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-        raise MissingDependency("請先安裝 python-docx：pip install python-docx") from exc
+        raise MissingDependency("請先安裝 python-docx。") from exc
 
     document = Document(BytesIO(data))
     tables: list[ParsedTable] = []
@@ -177,10 +227,11 @@ def _parse_docx(file_name: str, data: bytes) -> list[ParsedTable]:
         if rows:
             tables.append(
                 ParsedTable(
-                    label=f"{file_name} / Word 表格 {table_number}",
+                    label=f"{file_name} / Word table {table_number}",
                     file_name=file_name,
                     kind="word-table",
                     dataframe=_normalize_dataframe(pd.DataFrame(rows)),
+                    source_sheet_name=f"Word table {table_number}",
                 )
             )
 
@@ -191,11 +242,12 @@ def _parse_docx(file_name: str, data: bytes) -> list[ParsedTable]:
     if lines:
         return [
             ParsedTable(
-                label=f"{file_name} / Word 文字",
+                label=f"{file_name} / Word text",
                 file_name=file_name,
                 kind="word-text",
                 dataframe=_normalize_dataframe(pd.DataFrame(lines)),
-                note="這份 Word 沒有表格，已用逐段文字方式讀取。",
+                note="Word 沒有表格，已用文字行讀取；請手動確認欄位。",
+                source_sheet_name="Word text",
             )
         ]
 
@@ -205,7 +257,8 @@ def _parse_docx(file_name: str, data: bytes) -> list[ParsedTable]:
             file_name=file_name,
             kind="word-empty",
             dataframe=pd.DataFrame(),
-            note="沒有讀到可用文字或表格。",
+            note="Word 檔沒有讀到表格或文字。",
+            source_sheet_name="Word",
         )
     ]
 

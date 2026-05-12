@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from invoice_packing_cleaner.pdf_text_tools import pdf_page_to_rows
 from invoice_packing_cleaner.table_tools import clean_header, excel_column_label, make_unique_headers
 
 
@@ -186,8 +187,7 @@ def _parse_pdf_template(file_name: str, data: bytes) -> list[TemplateCandidate]:
             if page_had_candidate:
                 continue
 
-            text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
-            rows = _pdf_text_to_rows(text)
+            rows = pdf_page_to_rows(page)
             if not rows:
                 continue
 

@@ -140,32 +140,51 @@ def main() -> None:
 
     with st.sidebar:
         st.header("基本設定")
+        st.caption("\u9019\u5340\u53ea\u7528\u4f86\u547d\u540d\u3001\u5206\u985e\u8207\u65e5\u5f8c\u641c\u5c0b\u898f\u5247\uff1b\u4e0d\u6703\u6539\u8b8a\u4e0b\u65b9 TINV / TPKG \u7684\u6b04\u4f4d\u5c0d\u61c9\u3002")
         customer_name = st.text_input(
             "客戶 / 規則名稱",
             value=str(imported_profile.get("customer_name", "")),
-            placeholder="例如 TTI、客戶A、2026新版格式",
+            placeholder="\u4f8b\uff1a\u76df\u946b_2026_OP / TTI_\u65b0\u7248PDF / \u5ba2\u6236A_\u5831\u95dc\u683c\u5f0f",
+            help="\u7528\u65bc\u898f\u5247\u6e05\u55ae\u3001JSON \u6a94\u540d\u8207 VBA \u6a94\u540d\u3002\u5efa\u8b70\u586b\u300e\u5be6\u969b\u6536\u4ef6\u5ba2\u6236\u6216\u4f9b\u61c9\u5546 + \u683c\u5f0f\u7279\u5fb5\u300f\u3002",
         )
         imported_classification = _classification_profile(imported_profile)
         with st.expander("客戶規則分類", expanded=True):
+            st.markdown(
+                "\u7528\u6cd5\uff1a\n"
+                "1. \u516c\u53f8\u5ba2\u6236/\u898f\u5247\u540d\u7a31\uff1a\u4e3b\u8981\u540d\u7a31\uff0c\u6703\u9032\u5165\u6a94\u540d\u8207\u898f\u5247\u6e05\u55ae\u3002\n"
+                "2. \u7d42\u7aef\u5ba2\u6236\uff1a\u6587\u4ef6\u4e0a\u7684 Buyer / Consignee / \u54c1\u724c\u3002\n"
+                "3. \u898f\u5247\u5206\u985e\uff1a\u683c\u5f0f\u7279\u5fb5\u6216\u820a\u7248 Excel \u9078\u55ae\u540d\u7a31\uff0c\u591a\u500b\u7528\u9017\u865f\u5206\u9694\u3002\n"
+                "4. \u641c\u5c0b\u6a19\u7c64\uff1a\u653e PDF/Excel\u3001\u9801\u78bc\u3001\u6b04\u4f4d\u3001\u91cd\u91cf\u7b97\u6cd5\u7b49\u95dc\u9375\u5b57\u3002"
+            )
             end_customer_name = st.text_input(
                 "終端客戶 / 買方 / 品牌",
                 value=str(imported_classification.get("end_customer_name", "")),
-                placeholder="例如：客戶的客戶、品牌、Consignee",
+                placeholder="\u4f8b\uff1aMAEDA KOSEN / BOSCH / TREK / Consignee \u540d\u7a31",
+                help="\u586b\u6587\u4ef6\u4e0a\u7684 Buyer\u3001Consignee\u3001\u54c1\u724c\u6216\u5ba2\u6236\u7684\u5ba2\u6236\u3002\u6c92\u6709\u660e\u78ba\u8cc7\u8a0a\u53ef\u7559\u7a7a\u3002",
             )
             rule_category = st.text_input(
                 "規則分類",
                 value=str(imported_classification.get("rule_category", "")),
-                placeholder="例如：一般格式 / 總重推算 / 特殊品名",
+                placeholder="\u4f8b\uff1aPDF\u5ea7\u6a19\u5207\u6b04, Packing\u7b2c13\u5217, GW\u7e3d\u91cd\u63a8\u7b97",
+                help="\u5beb\u9019\u4efd\u898f\u5247\u7684\u683c\u5f0f\u6216\u8655\u7406\u7279\u5fb5\u3002\u591a\u500b\u540d\u7a31\u7528\u9017\u865f\u5206\u9694\u6642\uff0c\u6703\u4fdd\u7559\u70ba\u820a\u7248 Excel \u9078\u55ae\u9805\u76ee\u3002",
             )
             rule_tags = st.text_input(
                 "搜尋標籤",
                 value=", ".join(imported_classification.get("tags", [])),
-                placeholder="例如：GW總重, NW單箱, 易昇",
+                placeholder="\u4f8b\uff1aPDF, page2 6\u6b04, Packing No, Net Weight, Gross Weight",
+                help="\u7528\u9017\u865f\u5206\u9694\u3002\u5efa\u8b70\u653e\u4f86\u6e90\u683c\u5f0f\u3001\u9801\u78bc/\u5217\u865f\u3001\u91cd\u91cf\u6b04\u4f4d\u3001\u7279\u6b8a\u55ae\u4f4d\u3002",
             )
             rule_note = st.text_area(
                 "規則備註",
                 value=str(imported_classification.get("note", "")),
-                height=90,
+                placeholder=(
+                    "\u4f8b\uff1a\n"
+                    "- \u7b2c2\u9801 Packing header \u5728\u7b2c13\u5217\uff0c\u8cc7\u6599\u7b2c14\u5217\u8d77\n"
+                    "- Quantity / Net Weight / Gross Weight \u4f7f\u7528 PDF \u5ea7\u6a19\u5207\u6b04\n"
+                    "- \u627e\u4e0d\u5230\u914d\u5c0d\u6642\u8f38\u51fa OP row \u4e26\u6a19\u9ec3"
+                ),
+                height=130,
+                help="\u5beb\u7d66\u672a\u4f86\u7684\u81ea\u5df1\u770b\u3002\u8a18\u9304\u4f8b\u5916\u3001\u6aa2\u67e5\u9ede\u8207\u4eba\u5de5\u78ba\u8a8d\u65b9\u5f0f\u3002",
             )
         lookup_mode_label = st.radio(
             "VBA 尋找來源欄位方式",

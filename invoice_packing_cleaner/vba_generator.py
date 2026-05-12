@@ -1882,7 +1882,7 @@ def _generate_tinv_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
 
     headerRow = {max(rule.header_row, 1)}
     ContentStartRow = {max(rule.data_start_row, 1)}
-    lastRow = LastUsedRow(Dst)
+    lastRow = Dst.UsedRange.Rows(Dst.UsedRange.Rows.count).Row
 
     Call CollectDataTinv(Dst, tempCollection, ContentStartRow, lastRow)
 
@@ -1998,7 +1998,7 @@ def _generate_tpkg_temp_array_procedure(rule: SheetTransformRule, lookup_mode: s
 
     headerRow = {max(rule.header_row, 1)}
     ContentStartRow = {max(rule.data_start_row, 1)}
-    lastRow = LastUsedRow(Dst)
+    lastRow = Dst.UsedRange.Rows(Dst.UsedRange.Rows.count).Row
 
     Call CollectDataTpkg(Dst, tempCollection, ContentStartRow, lastRow)
 
@@ -2106,7 +2106,7 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             If Len(Cno) > 0 Then lastCno = Cno
             UQty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("qty", "quantity", "數量")))
             Qty = CleanNumberText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit qty", "uqty", "qty ctn", "q'ty ctn", "qty/ctn", "數量")))
-            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = NumberToText(Val(UQty) / Val(CTN))
+            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = CStr(Round(Val(UQty) / Val(CTN), 4))
             If Len(Qty) = 0 Then Qty = UQty
             If Len(UQty) = 0 Then UQty = Qty
             unit = DefaultText(FirstMappedValue(Dst, i, sourceCols, targetHeaders, sourceHeaders, Array("unit", "uom", "單位")), "CTN")
@@ -2183,37 +2183,7 @@ def generate_op_temp_array_vba(
 ) -> str:
     inv_rule = _find_rule(rules, "TINV")
     pkg_rule = _find_rule(rules, "TPKG")
-    multi_box_mode = bool(pkg_rule.multi_box_mode) if pkg_rule else False
-
-    inv_header_row = max(inv_rule.header_row, 1) if inv_rule else 1
-    inv_data_start = max(inv_rule.data_start_row, 1) if inv_rule else 2
-    pkg_header_row = max(pkg_rule.header_row, 1) if pkg_rule else 1
-    pkg_data_start = max(pkg_rule.data_start_row, 1) if pkg_rule else 2
     fixed_title = inv_rule.fixed_title if inv_rule else ""
-
-    inv_po_col = _strict_col(inv_rule, "po")
-    inv_item_col = _strict_col(inv_rule, "item")
-    inv_line_col = _strict_col(inv_rule, "line")
-    inv_desc_col = _strict_col(inv_rule, "description", "desc")
-    inv_qty_col = _strict_col(inv_rule, "quantity", "qty")
-    inv_unit_col = _strict_col(inv_rule, "unit", "uom")
-    inv_price_col = _strict_col(inv_rule, "unit price", "price", "upce")
-    inv_amount_col = _strict_col(inv_rule, "amount")
-    inv_brand_col = _strict_col(inv_rule, "brand")
-    inv_customer_item_col = _strict_col(inv_rule, "customer")
-
-    pkg_cust_po_col = _strict_col(pkg_rule, "customer po", "cust po")
-    pkg_po_col = _strict_col(pkg_rule, "po")
-    pkg_carton_col = _strict_col(pkg_rule, "carton no", "marks", "case no")
-    pkg_ctn_col = _strict_col(pkg_rule, "ctn", "carton", "package")
-    pkg_item_col = _strict_col(pkg_rule, "item")
-    pkg_desc_col = _strict_col(pkg_rule, "description", "desc")
-    pkg_qty_col = _strict_col(pkg_rule, "quantity", "qty")
-    pkg_unit_qty_col = _strict_col(pkg_rule, "unit qty", "qty/ctn", "q'ty")
-    pkg_unit_col = _strict_col(pkg_rule, "unit", "uom")
-    pkg_nw_col = _strict_col(pkg_rule, "net", "n.w", "nw")
-    pkg_gw_col = _strict_col(pkg_rule, "gross", "g.w", "gw")
-    pkg_ms_col = _strict_col(pkg_rule, "measurement", "cbm", "measure")
 
     return f'''
 ' ==============================================================================
@@ -2224,21 +2194,12 @@ def generate_op_temp_array_vba(
 ' ==============================================================================
 
 Private Info As Variant
-Private INVcollection As Collection
-Private PKGcollection As Collection
-Private target As Collection
-Private map As Collection
-Private Dst As Worksheet, Tst As Worksheet, Lst As Worksheet
-Private Inv As Worksheet, Pkg As Worksheet, InvPkg As Worksheet
-Private WB As Workbook
-Private Const ENABLE_MULTI_BOX_DETAIL As Boolean = {_vba_boolean(multi_box_mode)}
 
 ' ==============================================================================
 ' 1. 主程式開關 (Main)
 ' 負責檢查資料是否準備好，並決定要先執行哪個步驟
 ' ==============================================================================
 Sub Main()
-    Set WB = ActiveWorkbook
     Set Inv = WB.Sheets("Inv")
     Set Pkg = WB.Sheets("Pkg")
 
@@ -2262,19 +2223,17 @@ End Sub
 Private Sub TINV(Dst As Worksheet, Tst As Worksheet)
     Dim headerRow As Long, ContentStartRow As Long, lastRow As Long, newRow As Long, chkCounter As Long
     Dim tempCollection As Collection
-    Dim foundHeader As Range
 
     Set tempCollection = New Collection
-    Set foundHeader = Dst.Cells.Find(What:="*DESC*", LookIn:=xlValues, LookAt:=xlWhole)
-    If foundHeader Is Nothing Then
-        headerRow = {inv_header_row}
-    Else
-        headerRow = foundHeader.Row
-    End If
+    headerRow = Dst.Cells.Find(What:="*DESC*", _
+                               LookIn:=xlValues, _
+                               LookAt:=xlWhole).Row
     ContentStartRow = headerRow + 1
-    If ContentStartRow < {inv_data_start} Then ContentStartRow = {inv_data_start}
 
-    lastRow = LastUsedRow(Dst)
+    Dim d As Object
+    Set map = ExploreFieldsWithSmartMatch(Dst, headerRow, ContentStartRow, 1, 0, 15)
+
+    lastRow = Dst.UsedRange.Rows(Dst.UsedRange.Rows.count).Row
     CollectDataTinv Dst, tempCollection, ContentStartRow, lastRow
 
     newRow = 2
@@ -2290,18 +2249,19 @@ End Sub
 Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
                             ByVal ContentStartRow As Long, ByVal lastRow As Long)
     Const FIXED_TITLE As String = {_vba_string(fixed_title)}
-    Const colPO As Long = {inv_po_col}
-    Const colPno As Long = {inv_item_col}
-    Const colLine As Long = {inv_line_col}
-    Const colDSC As Long = {inv_desc_col}
-    Const colQty As Long = {inv_qty_col}
-    Const colUnit As Long = {inv_unit_col}
-    Const colUPCE As Long = {inv_price_col}
-    Const colAmt As Long = {inv_amount_col}
-    Const colBrand As Long = {inv_brand_col}
-    Const colCusItem As Long = {inv_customer_item_col}
-
     Dim i As Long, j As Long
+
+    colPO = GetColumn(Dst, map, "", "PO*")
+    colcode = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*LOGO*")
+    colPno = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*ITEM NO.*")
+    colDSC = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*DESC.*")
+    colQty = GetColumn(Dst, map, "\u6578\u91cf", "*QTY*")
+    colLine = GetColumn(Dst, map, "", "*Line*")
+    colUPCE = GetColumn(Dst, map, "\u55ae\u50f9", "*PRICE*")
+    colAmt = GetColumn(Dst, map, "\u91d1\u984d", "*AMOUNT*")
+    colBrand = 0
+    colCusItem = 0
+
     Dim tempArray As Variant
     Dim QtyArray As Variant
     Dim DscArray As Variant
@@ -2312,16 +2272,16 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Dim unit As String, Upce As String, Amt As String
     Dim HS As String, BRAND As String, CusItemNo As String
 
-    Title = CleanCellText(FIXED_TITLE)
+    Title = Trim(CStr(FIXED_TITLE))
 
     For i = ContentStartRow To lastRow
         If Len(Title) = 0 Then
-            If Len(CellTextAt(Dst, i, colDSC)) > 0 And Len(CellTextAt(Dst, i, colQty)) = 0 Then
-                If IsValidCombination(CellTextAt(Dst, i, colDSC), "^[A-Z ]+$") Then
-                    Title = CellTextAt(Dst, i, colDSC)
+            If Len(Trim(GetMergedValue(Dst.Cells(i, colDSC)))) > 0 And Len(Trim(GetMergedValue(Dst.Cells(i, colQty)))) = 0 Then
+                If IsValidCombination(Trim(GetMergedValue(Dst.Cells(i, colDSC))), "^[A-Z ]+$") Then
+                    Title = Trim(GetMergedValue(Dst.Cells(i, colDSC)))
                     For j = i To lastRow
-                        If LCase$(CellTextAt(Dst, j, 1)) Like "p.o*" Then
-                            PoNo = CellTextAt(Dst, j, 1)
+                        If LCase$(Trim(GetMergedValue(Dst.Cells(j, 1)))) Like "p.o*" Then
+                            PoNo = Trim(GetMergedValue(Dst.Cells(j, 1)))
                             Exit For
                         End If
                     Next j
@@ -2329,42 +2289,42 @@ Private Sub CollectDataTinv(ByRef Dst As Worksheet, ByRef tempCollection As Coll
             End If
         End If
 
-        If Len(CellTextAt(Dst, i, colQty)) > 0 And _
-           Len(CellTextAt(Dst, i, colDSC)) > 0 And _
-           IsValidCombination(CellTextAt(Dst, i, colQty), "^\\d+(\\.\\d+)?$") Then
+        If Len(Trim(GetMergedValue(Dst.Cells(i, colQty)))) > 0 And _
+           Len(Trim(GetMergedValue(Dst.Cells(i, colDSC)))) > 0 And _
+           IsValidCombination(Trim(GetMergedValue(Dst.Cells(i, colQty))), "^\\d+(\\.\\d+)?$") Then
 
-            rawPO = CellTextAt(Dst, i, colPO)
-            rawLine = CellTextAt(Dst, i, colLine)
-            rawPARTNO = CellTextAt(Dst, i, colPno)
-            rawDSC = CellTextAt(Dst, i, colDSC)
+            rawPO = Trim(GetMergedValue(Dst.Cells(i, colPO)))
+            rawLine = Trim(GetMergedValue(Dst.Cells(i, colLine)))
+            rawPARTNO = Trim(GetMergedValue(Dst.Cells(i, colPno)))
+            rawDSC = Trim(GetMergedValue(Dst.Cells(i, colDSC)))
             Itemno = rawPARTNO
             If Len(PoNo) = 0 Then PoNo = rawPO
 
-            DscArray = Array(PrefixValue("PO# ", rawPO), PrefixValue("LINE# ", rawLine), rawPARTNO, rawDSC)
+            DscArray = Array("PO# " & rawPO, "LINE# " & rawLine, rawPARTNO, rawDSC)
             PO = Array(Title, PoNo, False)
 
-            QtyValue = KeepRegex(CellTextAt(Dst, i, colQty), "[0-9.A-Z]+")
-            unit = DefaultText(CellTextAt(Dst, i, colUnit), "EACH")
-            rawUPCE = CellTextAt(Dst, i, colUPCE)
-            rawAmt = CellTextAt(Dst, i, colAmt)
+            QtyValue = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colQty))), "[0-9.A-Z]+")
+            unit = "EACH"
+            rawUPCE = Trim(GetMergedValue(Dst.Cells(i, colUPCE)))
+            rawAmt = Trim(GetMergedValue(Dst.Cells(i, colAmt)))
 
             If rawUPCE Like "*US$*" Or rawUPCE Like "*$*" Or rawUPCE Like "*USD*" Then unit = "PCS"
             QtyArray = Array(QtyValue, unit)
 
             If rawUPCE = "US$" Or rawUPCE = "$" Or rawUPCE = "USD" Then
-                Upce = CellTextAt(Dst, i, colUPCE + 1)
+                Upce = Trim(GetMergedValue(Dst.Cells(i, colUPCE + 1)))
             Else
                 Upce = KeepRegex(rawUPCE, "[0-9.]+")
             End If
 
             If rawAmt = "US$" Or rawAmt = "$" Or rawAmt = "USD" Then
-                Amt = CellTextAt(Dst, i, colAmt + 1)
+                Amt = Trim(GetMergedValue(Dst.Cells(i, colAmt + 1)))
             Else
                 Amt = KeepRegex(rawAmt, "[0-9.]+")
             End If
 
-            BRAND = CellTextAt(Dst, i, colBrand)
-            CusItemNo = DefaultText(CellTextAt(Dst, i, colCusItem), Itemno)
+            BRAND = ""
+            CusItemNo = Itemno
             tempArray = Array(i, Itemno, PO, QtyArray, Upce, Amt, DscArray, Title, HS, BRAND, CusItemNo)
             tempCollection.Add tempArray
         End If
@@ -2390,8 +2350,8 @@ Private Sub WriteDataTinv(ByRef Tst As Worksheet, ByRef Dst As Worksheet, _
     chkCounter = 1
     For i = 1 To tempCollection.Count
         ThisItem = tempCollection(i)
-        CurrentTitle = CleanCellText(GetSafeValue(ThisItem, 7))
-        CurrentPO = CleanCellText(GetInnerValue(ThisItem, 2, 1))
+        CurrentTitle = Trim(CStr(ThisItem(7)))
+        CurrentPO = Trim(CStr(ThisItem(2)(1)))
 
         With Tst
             If CurrentTitle <> LastTitle And CurrentTitle <> "" Then
@@ -2407,7 +2367,7 @@ Private Sub WriteDataTinv(ByRef Tst As Worksheet, ByRef Dst As Worksheet, _
                 LastPO = CurrentPO
             End If
 
-            descLines = GetSafeValue(ThisItem, 6)
+            descLines = ThisItem(6)
             If IsArray(descLines) Then
                 lb = LBound(descLines)
                 ub = UBound(descLines)
@@ -2428,19 +2388,19 @@ Private Sub WriteDataTinv(ByRef Tst As Worksheet, ByRef Dst As Worksheet, _
                 End If
                 If ub >= lb + 2 Then .Cells(newRow, 1).Value = Trim$(CStr(descLines(lb + 2)))
             Else
-                .Cells(newRow, 1).Value = GetSafeValue(ThisItem, 1)
+                .Cells(newRow, 1).Value = ThisItem(1)
             End If
 
-            .Cells(newRow, 2).Value = GetInnerValue(ThisItem, 3, 0)
-            .Cells(newRow, 3).Value = GetInnerValue(ThisItem, 3, 1)
-            .Cells(newRow, 4).Value = GetSafeValue(ThisItem, 4)
-            .Cells(newRow, 5).Value = GetSafeValue(ThisItem, 5)
+            .Cells(newRow, 2).Value = ThisItem(3)(0)
+            .Cells(newRow, 3).Value = ThisItem(3)(1)
+            .Cells(newRow, 4).Value = ThisItem(4)
+            .Cells(newRow, 5).Value = ThisItem(5)
             .Cells(newRow, 5).NumberFormat = "0.00"
-            .Cells(newRow, 6).Value = GetSafeValue(ThisItem, 8)
-            .Cells(newRow, 7).Value = GetSafeValue(ThisItem, 9)
+            .Cells(newRow, 6).Value = ThisItem(8)
+            .Cells(newRow, 7).Value = ThisItem(9)
             .Cells(newRow, 8).Value = chkCounter
-            .Cells(newRow, 9).Value = BuildCheckText(ThisItem)
-            .Cells(newRow, 10).Value = GetSafeValue(ThisItem, 1)
+            .Cells(newRow, 9).Value = Join(Array(Join(ThisItem(2)), Join(ThisItem(6)), ThisItem(3)(0)))
+            .Cells(newRow, 10).Value = ThisItem(1)
             newRow = newRow + 1
 
             If IsArray(descLines) Then
@@ -2464,18 +2424,17 @@ End Sub
 Private Sub TPKG(Dst As Worksheet, Tst As Worksheet, Lst As Worksheet)
     Dim headerRow As Long, ContentStartRow As Long, lastRow As Long, newRow As Long, chkCounter As Long
     Dim tempCollection As Collection
-    Dim foundHeader As Range
 
     Set tempCollection = New Collection
-    Set foundHeader = Dst.Cells.Find(What:="*DESC*", LookIn:=xlValues, LookAt:=xlWhole)
-    If foundHeader Is Nothing Then
-        headerRow = {pkg_header_row}
-    Else
-        headerRow = foundHeader.Row
-    End If
+    headerRow = Dst.Cells.Find(What:="*DESC*", _
+                               LookIn:=xlValues, _
+                               LookAt:=xlWhole).Row
     ContentStartRow = headerRow + 1
-    If ContentStartRow < {pkg_data_start} Then ContentStartRow = {pkg_data_start}
-    lastRow = LastUsedRow(Dst)
+    lastRow = Dst.UsedRange.Rows(Dst.UsedRange.Rows.count).Row
+
+    Dim d As Object
+    Set map = ExploreFieldsWithSmartMatch(Dst, headerRow, ContentStartRow, 0, 0, 5)
+    NonblankIdentifier = map.Item("\u6578\u91cf")("\u6b04\u4f4d")
 
     CollectDataTpkg Dst, tempCollection, ContentStartRow, lastRow
     newRow = 2
@@ -2490,21 +2449,22 @@ End Sub
 ' ==============================================================================
 Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Collection, _
                             ByVal ContentStartRow As Long, ByVal lastRow As Long)
-    Const colCNO As Long = {pkg_qty_col}
-    Const colCTN As Long = {pkg_ctn_col}
-    Const colPO As Long = {pkg_cust_po_col}
-    Const colcode As Long = {pkg_po_col}
-    Const colPno As Long = {pkg_item_col}
-    Const colDSC As Long = {pkg_desc_col}
-    Const colQty As Long = {pkg_qty_col}
-    Const colUQty As Long = {pkg_unit_qty_col}
-    Const colUnit As Long = {pkg_unit_col}
-    Const colNW As Long = {pkg_nw_col}
-    Const colGW As Long = {pkg_gw_col}
-    Const colMS As Long = {pkg_ms_col}
-    Const colCartonNo As Long = {pkg_carton_col}
-
     Dim i As Long
+
+    colCNO = GetColumn(Dst, map, "", "*Q'TY*")
+    colCTN = GetColumn(Dst, map, "", "CTN")
+    colPO = GetColumn(Dst, map, "", "PO*")
+    colcode = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*LOGO*")
+    colPno = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*ITEM NO.*")
+    colDSC = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*DESC.*")
+    colQty = GetColumn(Dst, map, "\u6578\u91cf", "*QTY*")
+    colUQty = GetColumn(Dst, map, "", "*Q'TY*")
+    colUnit = colQty + 1
+    colNW = GetColumn(Dst, map, "\u6de8\u91cd", "*N.W.*")
+    colGW = GetColumn(Dst, map, "\u6bdb\u91cd", "*G.W.*")
+    colMS = GetColumn(Dst, map, "\u9ad4\u7a4d", "*MEAS*")
+    colCartonNo = 0
+
     Dim tempArray As Variant
     Dim DscArray As Variant
     Dim QtyArray As Variant
@@ -2514,33 +2474,32 @@ Private Sub CollectDataTpkg(ByRef Dst As Worksheet, ByRef tempCollection As Coll
     Dim Qty As String, UQty As String, unit As String, NW As String, GW As String, MS As String
 
     For i = ContentStartRow To lastRow
-        If Len(CellTextAt(Dst, i, colQty)) > 0 And _
-           Len(CellTextAt(Dst, i, colDSC)) > 0 And _
-           IsValidCombination(CellTextAt(Dst, i, colQty), "\\d+") Then
+        If Len(Trim(GetMergedValue(Dst.Cells(i, colQty)))) > 0 And _
+           Len(Trim(GetMergedValue(Dst.Cells(i, colDSC)))) > 0 And _
+           IsValidCombination(Trim(GetMergedValue(Dst.Cells(i, colQty))), "\\d+") Then
 
-            rawCUST = CellTextAt(Dst, i, colPO)
-            rawPONO = CellTextAt(Dst, i, colcode)
-            rawPARTNO = CellTextAt(Dst, i, colPno)
-            rawDSC = CellTextAt(Dst, i, colDSC)
+            rawCUST = Trim(GetMergedValue(Dst.Cells(i, colPO)))
+            rawPONO = Trim(GetMergedValue(Dst.Cells(i, colcode)))
+            rawPARTNO = Trim(GetMergedValue(Dst.Cells(i, colPno)))
+            rawDSC = Trim(GetMergedValue(Dst.Cells(i, colDSC)))
             Itemno = rawPARTNO
 
-            CTN = KeepRegex(CellTextAt(Dst, i, colCTN), "[0-9.]+")
-            cno = CellTextAt(Dst, i, colCartonNo)
-            If Len(cno) = 0 Then cno = "1-" & NormalizeRangeNotation(CTN)
+            CTN = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colCTN))), "[0-9.]+")
+            cno = "1-" & NormalizeRangeNotation(CTN)
             cno = NormalizeRangeNotation(cno)
-            If Val(CTN) <= 0 Then CTN = CStr(CartonCountFromRange(cno))
+            If Val(CTN) <= 0 Then CTN = CStr(CountCtnRange(cno))
             If Val(CTN) <= 0 Then CTN = "1"
             PO = Array("", False, cno, Val(CTN))
 
-            DscArray = Array(PrefixValue("CUST P/O# ", rawCUST), PrefixValue("TTI PO NO. ", rawPONO), PrefixValue("CUST PART NO. ", rawPARTNO), rawDSC)
-            UQty = KeepRegex(CellTextAt(Dst, i, colQty), "\\d+(\\.\\d+)?")
-            Qty = KeepRegex(CellTextAt(Dst, i, colUQty), "\\d+(\\.\\d+)?")
-            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = NumberToText(Val(UQty) / Val(CTN))
+            DscArray = Array("CUST P/O# " & rawCUST, "TTI PO NO. " & rawPONO, "CUST PART NO. " & rawPARTNO, rawDSC)
+            UQty = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colQty))), "\\d+(\\.\\d+)?")
+            Qty = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colUQty))), "\\d+(\\.\\d+)?")
+            If Len(Qty) = 0 And Val(CTN) > 0 And Len(UQty) > 0 Then Qty = CStr(Round(Val(UQty) / Val(CTN), 4))
             If Len(Qty) = 0 Then Qty = UQty
-            unit = ConvertToSingularUnit(DefaultText(CellTextAt(Dst, i, colUnit), "CTN"))
-            NW = KeepRegex(CellTextAt(Dst, i, colNW), "\\d+(\\.\\d+)?")
-            GW = KeepRegex(CellTextAt(Dst, i, colGW), "\\d+(\\.\\d+)?")
-            MS = KeepRegex(CellTextAt(Dst, i, colMS), "\\d+(\\.\\d+)?")
+            unit = ConvertToSingularUnit(KeepRegex(Dst.Cells(i, colUnit), "[A-Z]+"))
+            NW = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colNW))), "\\d+(\\.\\d+)?")
+            GW = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colGW))), "\\d+(\\.\\d+)?")
+            MS = KeepRegex(Trim(GetMergedValue(Dst.Cells(i, colMS))), "\\d+(\\.\\d+)?")
 
             QtyArray = Array(UQty, Qty, unit)
             If Not IsEmpty(Qty) Then
@@ -2583,7 +2542,7 @@ Private Sub WriteDataTpkg(ByRef Tst As Worksheet, ByRef Dst As Worksheet, ByRef 
             INVItem = INVcollection(j)
             If Not InCollection(PKGUsedItem, CStr(pkgItem(0))) And _
                Not InCollection(INVUsedItem, CStr(INVItem(0))) Then
-                If CleanCellText(pkgItem(1)) = CleanCellText(INVItem(1)) Then
+                If Trim(CStr(pkgItem(1))) = Trim(CStr(INVItem(1))) Then
                     MatchResult.Add j, CStr(i)
                     PKGUsedItem.Add CStr(pkgItem(0)), CStr(pkgItem(0))
                     INVUsedItem.Add CStr(INVItem(0)), CStr(INVItem(0))
@@ -2604,38 +2563,38 @@ Private Sub WriteDataTpkg(ByRef Tst As Worksheet, ByRef Dst As Worksheet, ByRef 
         If matchedINVIndex > 0 Then
             INVItem = INVcollection(matchedINVIndex)
             Write_DSC = INVItem(6)
-            Write_UNIT = GetInnerValue(INVItem, 3, 1)
-            Write_CHK = BuildCheckText(INVItem)
+            Write_UNIT = INVItem(3)(1)
+            Write_CHK = Join(Array(Join(INVItem(2)), Join(INVItem(6)), INVItem(3)(0)))
             Write_NotFound = False
         Else
             Write_DSC = pkgItem(6)
-            Write_UNIT = GetInnerValue(pkgItem, 3, 2)
-            Write_CHK = BuildCheckText(pkgItem)
+            Write_UNIT = pkgItem(3)(2)
+            Write_CHK = Join(Array(Join(pkgItem(2)), Join(pkgItem(6)), pkgItem(3)(0)))
             Write_NotFound = True
         End If
 
-        Write_CNO = NormalizeRangeNotation(CStr(GetInnerValue(pkgItem, 2, 2)))
-        Write_CTN = Val(GetInnerValue(pkgItem, 2, 3))
+        Write_CNO = NormalizeRangeNotation(CStr(pkgItem(2)(2)))
+        Write_CTN = Val(pkgItem(2)(3))
         If Write_CTN <= 0 Then Write_CTN = 1
-        Write_UQTY = Val(GetInnerValue(pkgItem, 3, 0))
-        Write_QTY = Val(GetInnerValue(pkgItem, 3, 1))
+        Write_UQTY = Val(pkgItem(3)(0))
+        Write_QTY = Val(pkgItem(3)(1))
         If Write_QTY <= 0 Then Write_QTY = Write_UQTY
-        Write_UNW = Val(GetSafeValue(pkgItem, 4))
-        Write_UGW = Val(GetSafeValue(pkgItem, 5))
+        Write_UNW = Val(pkgItem(4))
+        Write_UGW = Val(pkgItem(5))
         Write_NW = Round(Write_UNW * Write_CTN, 2)
         Write_GW = Round(Write_UGW * Write_CTN, 2)
-        Write_MS = Val(GetSafeValue(pkgItem, 7))
+        Write_MS = Val(pkgItem(7))
 
         With Tst
             If i = 1 Then
-                .Cells(newRow, 1).Value = SafeExcelText(Write_CNO)
+                .Cells(newRow, 1).Value = Write_CNO
                 .Cells(newRow, 2).Value = Write_CTN
                 LastPkgItem = pkgItem
             Else
-                If Write_CNO = CStr(GetInnerValue(LastPkgItem, 2, 3)) Then
-                    .Cells(newRow, 1).Value = SafeExcelText("#" & Write_CNO)
+                If Write_CNO = CStr(LastPkgItem(2)(2)) Then
+                    .Cells(newRow, 1).Value = "#" & Write_CNO
                 Else
-                    .Cells(newRow, 1).Value = SafeExcelText(Write_CNO)
+                    .Cells(newRow, 1).Value = Write_CNO
                     .Cells(newRow, 2).Value = Write_CTN
                 End If
                 LastPkgItem = pkgItem
@@ -2653,7 +2612,7 @@ Private Sub WriteDataTpkg(ByRef Tst As Worksheet, ByRef Dst As Worksheet, ByRef 
                 .Cells(newRow, 9).Interior.Color = vbYellow
             End If
 
-            If ENABLE_MULTI_BOX_DETAIL And Write_CTN > 1 Then
+            If Write_CTN > 1 Then
                 .Cells(newRow, 4).Value = "@" & Format(Write_QTY, "0")
                 .Cells(newRow, 6).Value = "@" & Format(Write_UNW, "0.00")
                 .Cells(newRow, 7).Value = "@" & Format(Write_UGW, "0.00")
@@ -2727,27 +2686,50 @@ Private Sub SayErrorCount(ws As Worksheet, tt As String)
 End Sub
 
 ' ==============================================================================
+' 輔助系統：自動跨分頁尋找 VGM 與 CBM 總數，並彈出視窗讓使用者確認
+' ==============================================================================
+Public Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
+    Dim ws As Worksheet
+    Dim fVGM As Range, fCBM As Range
+    Dim i As Long, textValue As String
+
+    actualVGM = 0
+    actualCBM = 0
+    For Each ws In ActiveWorkbook.Worksheets
+        Set fVGM = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fVGM Is Nothing Then
+            If fVGM.Column > 1 Then
+                textValue = KeepRegex(fVGM.Offset(0, -1).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+            If actualVGM <= 0 And fVGM.Column < ws.Columns.Count Then
+                textValue = KeepRegex(fVGM.Offset(0, 1).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then actualVGM = Val(textValue)
+            End If
+            If actualVGM <= 0 Then actualVGM = Val(KeepRegex(fVGM.Value, "[0-9.]+"))
+        End If
+
+        Set fCBM = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not fCBM Is Nothing Then
+            For i = 1 To 10
+                textValue = KeepRegex(fCBM.Offset(0, i).Value, "[0-9.]+")
+                If Val(textValue) > 0 Then
+                    actualCBM = Val(textValue)
+                    Exit For
+                End If
+            Next i
+        End If
+
+        If actualVGM > 0 And actualCBM > 0 Then Exit For
+    Next ws
+End Sub
+
+' ==============================================================================
 ' ==============================================================================
 ' 以下皆為系統「底層運算工具」，負責處理陣列安全與數量加減。
 ' 一般使用者請勿更動以下區域，避免系統崩潰。
 ' ==============================================================================
 ' ==============================================================================
-Private Sub WriteHeaders(ws As Worksheet, tt As String)
-    ws.Cells.Clear
-    If LCase$(tt) = "tinv" Then
-        ws.Range("A1:J1").Value = Array("DSC", "QTY", "UNIT", "UPCE", "AMT", "HS.", "BRAND", "NO.", "CHK", "ITEM NO")
-    Else
-        ws.Range("A1:K1").Value = Array("Ctn NO", "Ctn", "Description", "Qty", "Unit", "N.W.", "G.W.", "Measurement", "Inv NO", "CHK", "BRAND")
-        ws.Columns(1).NumberFormat = "@"
-        ws.Columns(10).NumberFormat = "@"
-    End If
-    ws.Rows(1).Font.Bold = True
-End Sub
-
-Private Sub SetColumnAWidth(ws As Worksheet, tt As String)
-    ws.Columns.AutoFit
-End Sub
-
 Function GetSafeValue(arr As Variant, idx As Long) As Variant
     On Error Resume Next
     GetSafeValue = arr(idx)
@@ -2812,217 +2794,4 @@ Private Function IsFullyUsed(ByRef UsedQtyCollection As Collection, ByVal key As
                              ByVal totalQty As Double) As Boolean
     IsFullyUsed = GetUsedQty(UsedQtyCollection, key) >= totalQty
 End Function
-
-Private Function InCollection(ByRef items As Collection, ByVal key As String) As Boolean
-    Dim value As Variant
-    On Error Resume Next
-    value = items(key)
-    InCollection = (Err.Number = 0)
-    Err.Clear
-    On Error GoTo 0
-End Function
-
-Private Function CellTextAt(ws As Worksheet, rowNo As Long, colNo As Long) As String
-    If colNo <= 0 Then
-        CellTextAt = vbNullString
-    Else
-        CellTextAt = CleanCellText(GetMergedValue(ws.Cells(rowNo, colNo)))
-    End If
-End Function
-
-Private Function GetMergedValue(cell As Range) As String
-    If cell.MergeCells Then
-        GetMergedValue = CStr(cell.MergeArea.Cells(1, 1).Text)
-    Else
-        GetMergedValue = CStr(cell.Text)
-    End If
-End Function
-
-Private Function CleanCellText(ByVal value As Variant) As String
-    Dim text As String
-    text = CStr(value)
-    text = Replace(text, Chr(13), " ")
-    text = Replace(text, Chr(10), " ")
-    text = Replace(text, Chr(9), " ")
-    CleanCellText = Application.WorksheetFunction.Trim(text)
-End Function
-
-Private Function CleanCell(ByVal cell As Range) As String
-    CleanCell = CleanCellText(cell.Text)
-End Function
-
-Private Function IsValidCombination(ByVal value As Variant, ByVal pattern As String) As Boolean
-    Dim re As Object
-    Set re = CreateObject("VBScript.RegExp")
-    re.Pattern = pattern
-    re.IgnoreCase = True
-    IsValidCombination = re.Test(CleanCellText(value))
-End Function
-
-Private Function KeepRegex(ByVal value As Variant, ByVal pattern As String) As String
-    Dim re As Object
-    Dim matches As Object
-    Set re = CreateObject("VBScript.RegExp")
-    re.Pattern = pattern
-    re.Global = False
-    re.IgnoreCase = True
-    Set matches = re.Execute(CleanCellText(value))
-    If matches.Count > 0 Then KeepRegex = matches(0).Value
-End Function
-
-Private Function PrefixValue(ByVal prefixText As String, ByVal value As String) As String
-    value = CleanCellText(value)
-    If Len(value) = 0 Then
-        PrefixValue = vbNullString
-    Else
-        PrefixValue = prefixText & value
-    End If
-End Function
-
-Private Function DefaultText(ByVal value As String, ByVal fallback As String) As String
-    value = CleanCellText(value)
-    If Len(value) = 0 Then
-        DefaultText = fallback
-    Else
-        DefaultText = value
-    End If
-End Function
-
-Private Function ConvertToSingularUnit(ByVal value As String) As String
-    value = UCase$(CleanCellText(value))
-    If Len(value) = 0 Then value = "CTN"
-    If Right$(value, 1) = "S" Then value = Left$(value, Len(value) - 1)
-    ConvertToSingularUnit = value
-End Function
-
-Private Function NumberToText(ByVal value As Double) As String
-    NumberToText = Trim$(Str$(Round(value, 4)))
-End Function
-
-Private Function NormalizeRangeNotation(ByVal value As String) As String
-    Dim text As String
-    text = NormalizeDateLikeCartonText(value)
-    text = Replace(text, " ", "")
-    text = Replace(text, "~", "-")
-    If Len(text) = 0 Then text = "1"
-    NormalizeRangeNotation = text
-End Function
-
-Private Function NormalizeDateLikeCartonText(ByVal value As String) As String
-    Dim text As String, parts As Variant, dayParts As Variant
-    Dim monthPart As String, dayPart As String, monthNo As Long
-    text = Replace(CleanCellText(value), " ", "")
-    If InStr(1, text, "月", vbTextCompare) > 0 And InStr(1, text, "日", vbTextCompare) > 0 Then
-        parts = Split(text, "月")
-        If UBound(parts) >= 1 Then
-            monthPart = KeepRegex(parts(0), "\\d+")
-            dayParts = Split(CStr(parts(1)), "日")
-            dayPart = KeepRegex(dayParts(0), "\\d+")
-            If Val(monthPart) > 0 And Val(dayPart) > 0 Then
-                NormalizeDateLikeCartonText = NumberToText(Val(monthPart)) & "-" & NumberToText(Val(dayPart))
-                Exit Function
-            End If
-        End If
-    End If
-    If InStr(1, text, "-", vbTextCompare) > 0 Then
-        parts = Split(text, "-")
-        monthNo = MonthNameToNumber(CStr(parts(0)))
-        If monthNo > 0 And UBound(parts) >= 1 Then
-            dayPart = KeepRegex(parts(1), "\\d+")
-            If Val(dayPart) > 0 Then
-                NormalizeDateLikeCartonText = NumberToText(monthNo) & "-" & NumberToText(Val(dayPart))
-                Exit Function
-            End If
-        End If
-    End If
-    NormalizeDateLikeCartonText = text
-End Function
-
-Private Function MonthNameToNumber(ByVal value As String) As Long
-    value = LCase$(Left$(CleanCellText(value), 3))
-    Select Case value
-        Case "jan": MonthNameToNumber = 1
-        Case "feb": MonthNameToNumber = 2
-        Case "mar": MonthNameToNumber = 3
-        Case "apr": MonthNameToNumber = 4
-        Case "may": MonthNameToNumber = 5
-        Case "jun": MonthNameToNumber = 6
-        Case "jul": MonthNameToNumber = 7
-        Case "aug": MonthNameToNumber = 8
-        Case "sep": MonthNameToNumber = 9
-        Case "oct": MonthNameToNumber = 10
-        Case "nov": MonthNameToNumber = 11
-        Case "dec": MonthNameToNumber = 12
-    End Select
-End Function
-
-Private Function CartonCountFromRange(ByVal cartonText As String) As Double
-    Dim parts As Variant
-    cartonText = NormalizeRangeNotation(cartonText)
-    If InStr(1, cartonText, "-", vbTextCompare) = 0 Then
-        CartonCountFromRange = Val(cartonText)
-    Else
-        parts = Split(cartonText, "-")
-        If UBound(parts) >= 1 Then CartonCountFromRange = Val(parts(1)) - Val(parts(0)) + 1
-    End If
-End Function
-
-Private Function SafeExcelText(ByVal value As Variant) As String
-    Dim text As String
-    text = CleanCellText(value)
-    If Len(text) = 0 Then
-        SafeExcelText = vbNullString
-    ElseIf Left$(text, 1) = "'" Then
-        SafeExcelText = text
-    Else
-        SafeExcelText = "'" & text
-    End If
-End Function
-
-Private Function BuildCheckText(ByVal item As Variant) As String
-    Dim text As String
-    If IsArray(GetSafeValue(item, 2)) Then text = Join(GetSafeValue(item, 2), " ")
-    If IsArray(GetSafeValue(item, 6)) Then text = text & " " & Join(GetSafeValue(item, 6), " ")
-    text = text & " " & CStr(GetInnerValue(item, 3, 0))
-    BuildCheckText = Application.WorksheetFunction.Trim(text)
-End Function
-
-' ==============================================================================
-' 輔助系統：自動跨分頁尋找 VGM 與 CBM 總數
-' ==============================================================================
-Public Sub GetActualTotals(ByRef actualVGM As Double, ByRef actualCBM As Double)
-    Dim ws As Worksheet
-    Dim fVGM As Range, fCBM As Range
-    Dim i As Long, textValue As String
-
-    actualVGM = 0
-    actualCBM = 0
-    For Each ws In ActiveWorkbook.Worksheets
-        Set fVGM = ws.Cells.Find(What:="VGM", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
-        If Not fVGM Is Nothing Then
-            If fVGM.Column > 1 Then
-                textValue = KeepRegex(fVGM.Offset(0, -1).Value, "[0-9.]+")
-                If Val(textValue) > 0 Then actualVGM = Val(textValue)
-            End If
-            If actualVGM <= 0 And fVGM.Column < ws.Columns.Count Then
-                textValue = KeepRegex(fVGM.Offset(0, 1).Value, "[0-9.]+")
-                If Val(textValue) > 0 Then actualVGM = Val(textValue)
-            End If
-            If actualVGM <= 0 Then actualVGM = Val(KeepRegex(fVGM.Value, "[0-9.]+"))
-        End If
-
-        Set fCBM = ws.Cells.Find(What:="紙板重", LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
-        If Not fCBM Is Nothing Then
-            For i = 1 To 10
-                textValue = KeepRegex(fCBM.Offset(0, i).Value, "[0-9.]+")
-                If Val(textValue) > 0 Then
-                    actualCBM = Val(textValue)
-                    Exit For
-                End If
-            Next i
-        End If
-
-        If actualVGM > 0 And actualCBM > 0 Then Exit For
-    Next ws
-End Sub
 '''

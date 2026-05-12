@@ -37,17 +37,52 @@ class OpTempArrayVbaGeneratorTests(unittest.TestCase):
             ]
         )
 
-        self.assertIn("' 【出貨報單自動化處理系統】", vba_code)
+        self.assertIn("' \u3010\u51fa\u8ca8\u5831\u55ae\u81ea\u52d5\u5316\u8655\u7406\u7cfb\u7d71\u3011", vba_code)
         self.assertIn("Private Info As Variant", vba_code)
-        self.assertRegex(vba_code, r"(?im)^\s*Sub\s+Main\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+TINV\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+TPKG\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+CollectDataTinv\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+WriteDataTinv\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+CollectDataTpkg\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+WriteDataTpkg\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+InvNo回寫\s*\(")
-        self.assertRegex(vba_code, r"(?im)^\s*Private\s+Sub\s+SayErrorCount\s*\(")
+        expected_names = [
+            "Main",
+            "TINV",
+            "CollectDataTinv",
+            "WriteDataTinv",
+            "TPKG",
+            "CollectDataTpkg",
+            "WriteDataTpkg",
+            "InvNo\u56de\u5beb",
+            "SayErrorCount",
+            "GetActualTotals",
+            "GetSafeValue",
+            "GetInnerValue",
+            "JoinPO",
+            "GetUsedQty",
+            "UpdateUsedQty",
+            "HasEnoughQty",
+            "IsFullyUsed",
+        ]
+        procedure_names = re.findall(
+            r"(?im)^\s*(?:Public|Private)?\s*(?:Sub|Function)\s+([A-Za-z_][A-Za-z0-9_]*|InvNo\u56de\u5beb)\b",
+            vba_code,
+        )
+        self.assertEqual(expected_names, procedure_names)
+
+        forbidden = [
+            "Private INVcollection",
+            "Private PKGcollection",
+            "Private Const ENABLE_MULTI_BOX_DETAIL",
+            "Dim foundHeader",
+            "Set foundHeader",
+            "Private Function LastUsedRow",
+            "Private Function ResolveOpColumn",
+            "Private Sub WriteHeaders",
+            "Private Function InCollection",
+            "Private Function CellTextAt",
+            "Private Function SafeExcelText",
+            "Private Function BuildCheckText",
+            "CellTextAt(",
+            "SafeExcelText(",
+            "BuildCheckText(",
+        ]
+        for text in forbidden:
+            self.assertNotIn(text, vba_code)
 
     def test_generated_vba_does_not_emit_streamlit_compatibility_procedures(self) -> None:
         vba_code = generate_op_temp_array_vba(
@@ -55,7 +90,7 @@ class OpTempArrayVbaGeneratorTests(unittest.TestCase):
                 _rule("TINV", "Inv", "Tinv"),
                 _rule("TPKG", "Pkg", "Tpkg"),
             ],
-            menu_items=["Default", "QC", "阿格西"],
+            menu_items=["Default", "QC", "\u963f\u683c\u897f"],
         )
 
         forbidden = [
@@ -93,7 +128,7 @@ class OpTempArrayVbaGeneratorTests(unittest.TestCase):
         self.assertIn('Const FIXED_TITLE As String = "HAND TOOL"', vba_code)
         self.assertNotIn("HAND TOOLS", vba_code)
 
-    def test_generated_vba_guards_carton_numbers_from_excel_date_conversion(self) -> None:
+    def test_generated_vba_keeps_carton_numbers_as_text_without_extra_helpers(self) -> None:
         vba_code = generate_op_temp_array_vba(
             [
                 _rule("TINV", "Inv", "Tinv"),
@@ -102,11 +137,52 @@ class OpTempArrayVbaGeneratorTests(unittest.TestCase):
         )
 
         self.assertIn('Tst.Columns(1).NumberFormat = "@"', vba_code)
-        self.assertIn("SafeExcelText(Write_CNO)", vba_code)
-        self.assertIn("Private Function NormalizeDateLikeCartonText", vba_code)
-        self.assertIn("Private Function MonthNameToNumber", vba_code)
+        self.assertIn('.Cells(newRow, 1).Value = Write_CNO', vba_code)
+        self.assertNotIn("Private Function NormalizeDateLikeCartonText", vba_code)
+        self.assertNotIn("Private Function MonthNameToNumber", vba_code)
 
-    def test_generated_vba_procedure_list_excludes_old_extra_entrypoints(self) -> None:
+    def test_generated_vba_uses_legacy_getcolumn_flow_when_saved_mapping_is_blank(self) -> None:
+        empty_tinv = SheetTransformRule(
+            procedure_name="CleanTINV",
+            source_sheet_name="Inv",
+            output_sheet_name="Tinv",
+            mappings=[
+                FieldMapping(target="Description", source_header="", source_index=0, target_col=1),
+                FieldMapping(target="Quantity", source_header="", source_index=0, target_col=2),
+                FieldMapping(target="Unit Price", source_header="", source_index=0, target_col=3),
+                FieldMapping(target="Amount", source_header="", source_index=0, target_col=4),
+            ],
+            header_row=2,
+            data_start_row=3,
+            output_header_row=1,
+            output_data_start_row=2,
+            fixed_title="",
+        )
+        empty_tpkg = SheetTransformRule(
+            procedure_name="CleanTPKG",
+            source_sheet_name="Pkg",
+            output_sheet_name="Tpkg",
+            mappings=[
+                FieldMapping(target="CTN", source_header="", source_index=0, target_col=1),
+                FieldMapping(target="Unit Qty", source_header="", source_index=0, target_col=2),
+                FieldMapping(target="Gross Weight", source_header="", source_index=0, target_col=3),
+            ],
+            header_row=2,
+            data_start_row=3,
+            output_header_row=1,
+            output_data_start_row=2,
+            fixed_title="",
+        )
+
+        vba_code = generate_op_temp_array_vba([empty_tinv, empty_tpkg], lookup_mode="position")
+
+        self.assertIn("Set map = ExploreFieldsWithSmartMatch", vba_code)
+        self.assertIn('colDSC = GetColumn(Dst, map, "\u54c1\u9805\u63cf\u8ff0", "*DESC.*")', vba_code)
+        self.assertIn('colQty = GetColumn(Dst, map, "\u6578\u91cf", "*QTY*")', vba_code)
+        self.assertNotIn("Const fallbackColDSC", vba_code)
+        self.assertNotIn("ResolveOpColumn", vba_code)
+
+    def test_get_actual_totals_sits_before_bottom_helper_area(self) -> None:
         vba_code = generate_op_temp_array_vba(
             [
                 _rule("TINV", "Inv", "Tinv"),
@@ -114,25 +190,9 @@ class OpTempArrayVbaGeneratorTests(unittest.TestCase):
             ]
         )
 
-        procedure_names = set(
-            re.findall(
-                r"(?im)^\s*(?:Public|Private)?\s*(?:Sub|Function)\s+([A-Za-z_][A-Za-z0-9_]*|InvNo回寫)\b",
-                vba_code,
-            )
-        )
-        forbidden_names = {
-            "MainProcess",
-            "MainProcess_Streamlit",
-            "Streamlit_Main",
-            "Streamlit_BuildOPTempArrays",
-            "Streamlit_ExportOPTempArrayPreview",
-            "Streamlit_MenuItems",
-            "Streamlit_BindLegacyButtons",
-            "Streamlit_TINV",
-            "Streamlit_TPKG",
-        }
-
-        self.assertTrue(procedure_names.isdisjoint(forbidden_names), procedure_names & forbidden_names)
+        self.assertLess(vba_code.index("Public Sub GetActualTotals"), vba_code.index("Function GetSafeValue"))
+        self.assertLess(vba_code.index("Private Sub SayErrorCount"), vba_code.index("Public Sub GetActualTotals"))
+        self.assertLess(vba_code.index("\u4ee5\u4e0b\u7686\u70ba\u7cfb\u7d71"), vba_code.index("Function GetSafeValue"))
 
 
 if __name__ == "__main__":

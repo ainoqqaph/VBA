@@ -32,6 +32,15 @@ class LegacyMenuItemTests(unittest.TestCase):
         self.assertNotIn('key=f"{key}_nw_mode"', app_source)
         self.assertNotIn('key=f"{key}_gw_mode"', app_source)
 
+    def test_sidebar_classification_copy_explains_usage(self) -> None:
+        app_source = Path("app.py").read_text(encoding="utf-8")
+
+        self.assertIn("\\u9019\\u5340\\u53ea\\u7528\\u4f86", app_source)
+        self.assertIn("\\u7528\\u6cd5", app_source)
+        self.assertIn("PDF\\u5ea7\\u6a19\\u5207\\u6b04", app_source)
+        self.assertIn("page2 6\\u6b04", app_source)
+        self.assertIn("OP row", app_source)
+
     def test_op_runtime_defaults_match_yi_sheng_final_layout(self) -> None:
         tinv = OP_TEMP_ARRAY_RUNTIME_RULES["TINV"]
         tpkg = OP_TEMP_ARRAY_RUNTIME_RULES["TPKG"]

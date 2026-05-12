@@ -262,10 +262,24 @@ def make_unique_headers(raw_headers: list[object]) -> list[str]:
 def build_source_options(headers: list[str]) -> list[SourceColumn]:
     options = [SourceColumn("（留空）", 0, "")]
     for index, header in enumerate(headers, start=1):
-        column_letter = excel_column_label(index)
-        short_header = header if len(header) <= 70 else f"{header[:67]}..."
-        options.append(SourceColumn(f"{column_letter} | {short_header}", index, header))
+        options.append(SourceColumn(_source_option_label(index, header), index, header))
     return options
+
+
+def _source_option_label(index: int, header: str) -> str:
+    preview_index = str(index - 1)
+    header = str(header or "").strip()
+
+    if not header or _is_generated_column_header(index, header):
+        return preview_index
+
+    short_header = header if len(header) <= 70 else f"{header[:67]}..."
+    return f"{preview_index} | {short_header}"
+
+
+def _is_generated_column_header(index: int, header: str) -> bool:
+    column_letter = excel_column_label(index)
+    return bool(re.fullmatch(rf"Column {re.escape(column_letter)}(?:_\d+)?", header))
 
 
 def find_default_source_index(target: str, options: list[SourceColumn]) -> int:

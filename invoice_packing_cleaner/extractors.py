@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from invoice_packing_cleaner.pdf_text_tools import pdf_page_to_rows
+
 
 @dataclass(frozen=True)
 class ParsedTable:
@@ -137,15 +139,14 @@ def _parse_pdf(file_name: str, data: bytes) -> list[ParsedTable]:
                         )
                 continue
 
-            text = page.extract_text() or ""
-            lines = [[line] for line in text.splitlines() if line.strip()]
-            if lines:
+            rows = pdf_page_to_rows(page)
+            if rows:
                 tables.append(
                     ParsedTable(
                         label=f"{file_name} / PDF page {page_number} text",
                         file_name=file_name,
                         kind="pdf-text",
-                        dataframe=_normalize_dataframe(pd.DataFrame(lines)),
+                        dataframe=_normalize_dataframe(pd.DataFrame(rows)),
                         note="PDF 沒有表格線，已先用文字行讀取；若欄位不準，請改用 OCR 或手動欄位對應。",
                         source_sheet_name=f"PDF page {page_number} text",
                     )
